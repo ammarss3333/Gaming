@@ -3,18 +3,19 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>CORE DEFENDER // ICE_BREAKER</title>
+<title>CORE DEFENDER // OVERCLOCK</title>
 <style>
   /* ============================================================
      PRESENTATION LAYER (pure CSS — no external assets)
      A retro-CRT arcade frame: scanlines, vignette, neon glow.
      ============================================================ */
   :root {
-    --bg:        #05060c;   /* deep space background        */
-    --neon-cyan: #38f5ff;   /* player / friendly accent     */
-    --neon-pink: #ff3d8b;   /* danger / enemy accent        */
-    --neon-amber:#ffd23f;   /* score / power accent         */
-    --grid:      rgba(56,245,255,0.06);
+    --bg:        #04050b;
+    --neon-cyan: #38f5ff;
+    --neon-pink: #ff3d8b;
+    --neon-amber:#ffd23f;
+    --neon-green:#3dff9e;
+    --grid:      rgba(56,245,255,0.05);
   }
 
   * { margin:0; padding:0; box-sizing:border-box; }
@@ -23,20 +24,17 @@
     width:100%; height:100%; overflow:hidden;
     background:var(--bg);
     font-family: "Courier New", monospace;
-    /* Disable text selection / callouts so dragging feels game-like */
     user-select:none; -webkit-user-select:none; -webkit-touch-callout:none;
     cursor: crosshair;
   }
 
-  /* The canvas fills the screen; it's the actual game surface. */
   #game {
     display:block;
     width:100%; height:100%;
-    background: radial-gradient(circle at 50% 50%, #0a0e1f 0%, #05060c 70%, #020308 100%);
+    background: radial-gradient(circle at 50% 42%, #0c1330 0%, #06091a 60%, #020308 100%);
   }
 
-  /* CRT scanline + vignette overlay sits ON TOP of the canvas but
-     ignores pointer events so clicks still reach the game. */
+  /* CRT scanline + vignette overlay; ignores pointer events. */
   #crt {
     position:fixed; inset:0; pointer-events:none; z-index:10;
     background:
@@ -44,18 +42,18 @@
         to bottom,
         rgba(0,0,0,0)    0px,
         rgba(0,0,0,0)    2px,
-        rgba(0,0,0,0.18) 3px,
-        rgba(0,0,0,0.18) 4px
+        rgba(0,0,0,0.16) 3px,
+        rgba(0,0,0,0.16) 4px
       );
     mix-blend-mode: multiply;
     animation: flicker 6s infinite;
   }
   #crt::after {
     content:""; position:absolute; inset:0;
-    background: radial-gradient(circle at 50% 50%, transparent 55%, rgba(0,0,0,0.55) 100%);
+    background: radial-gradient(circle at 50% 50%, transparent 52%, rgba(0,0,0,0.6) 100%);
   }
   @keyframes flicker {
-    0%,100%{opacity:0.9} 48%{opacity:0.9} 50%{opacity:0.75} 52%{opacity:0.9}
+    0%,100%{opacity:0.92} 48%{opacity:0.92} 50%{opacity:0.78} 52%{opacity:0.92}
   }
 </style>
 </head>
@@ -66,20 +64,20 @@
 <script>
 "use strict";
 /* ================================================================
-   CORE DEFENDER
-   A central CPU core is under siege. You command an orbiting
-   defense turret. Rotate around the core, blast the corrupted data
-   blocks before they breach the core. Survive escalating waves.
+   CORE DEFENDER // OVERCLOCK
+   An auto-firing survivor-like. A central CPU core is under siege.
+   You command an orbiting defense turret that AUTO-TARGETS the
+   nearest threat. Rotate around the core to cover the swarm, vacuum
+   up XP, level up, and pick from a deck of stacking upgrades to
+   build an overpowered defense grid. Survive escalating waves and
+   boss assaults.
 
    ── CONTROLS ───────────────────────────────────────────────────
-   • A / D   or  ◄ / ►   →  Rotate turret around the core
-   • Move MOUSE           →  Aim turret toward cursor (auto-orbit)
-   • SPACE or HOLD CLICK   →  Fire
-   • R                    →  Restart after death
-   • P                    →  Pause
-
-   Everything below is heavily commented. The CONFIG block is the
-   first thing you'll want to tweak.
+   • A / D  or  ◄ / ►   →  Rotate turret around the core
+   • Move MOUSE          →  Swing turret toward cursor side
+   • SPACE / CLICK       →  PULSE NOVA  (manual shockwave, on cooldown)
+   • 1 / 2 / 3           →  Pick upgrade on the level-up screen
+   • P  pause   •  M  mute   •  R  restart
    ================================================================ */
 
 
@@ -88,71 +86,118 @@
    ================================================================= */
 const CONFIG = {
   // --- Core (the thing you protect) ---
-  coreRadius:        46,    // visual + collision radius of the core
-  coreMaxHealth:     100,   // starting core HP
-  coreDamagePerHit:  12,    // HP lost when a basic enemy breaches
+  coreRadius:        46,
+  coreMaxHealth:     100,
+  coreDamagePerHit:  10,
 
   // --- Player turret ---
-  orbitRadius:       118,   // distance the turret sits from core center
-  turretSize:        18,    // turret triangle size
-  rotateSpeed:       4.2,   // radians/sec when using keyboard
-  mouseAimLerp:      14,    // how snappily the turret follows the mouse
-  fireRate:          0.13,  // seconds between shots (lower = faster)
-  bulletSpeed:       720,   // px/sec
-  bulletLife:        1.4,   // seconds before a bullet despawns
-  bulletRadius:      4,
+  orbitRadius:       120,
+  turretSize:        20,
+  rotateSpeed:       4.2,    // radians/sec when using keyboard
+  mouseAimLerp:      12,
 
-  // --- Enemies ---
-  baseEnemySpeed:    55,    // px/sec at the very start
-  baseSpawnInterval: 1.5,   // seconds between spawns at the start
-  minSpawnInterval:  0.32,  // hardest possible spawn rate
-  difficultyRamp:    55,    // higher = slower difficulty climb
+  // --- Base weapon stats (upgrades modify the live `player` object) ---
+  baseFireRate:      0.34,   // seconds between shots
+  baseBulletSpeed:   760,
+  baseBulletLife:    1.2,
+  baseBulletRadius:  4.5,
+  baseDamage:        1,
 
-  // --- Scoring / combo ---
-  comboWindow:       1.6,   // seconds you have to chain a kill
-  maxCombo:          9,     // combo multiplier cap
+  // --- Pulse Nova (active ability) ---
+  novaCooldown:      6.0,
+  novaRadius:        230,
+  novaDamage:        3,
+
+  // --- Enemies / difficulty ---
+  baseEnemySpeed:    52,
+  baseSpawnInterval: 1.35,
+  minSpawnInterval:  0.30,
+  difficultyRamp:    70,     // higher = slower climb
+  waveSeconds:       26,     // seconds per wave
+  bossEveryWaves:    5,
+
+  // --- XP / leveling ---
+  baseXpToLevel:     5,
+  xpCurve:           1.32,   // each level needs this much more
+  baseMagnet:        110,    // XP pickup radius around turret
 
   // --- Juice ---
-  shakeOnHit:        0.55,  // screen trauma when core is breached (0-1)
-  shakeOnKill:       0.08,  // tiny shake on every kill
-  particlesPerKill:  16,
+  shakeOnHit:        0.55,
+  shakeOnKill:       0.06,
+  particlesPerKill:  14,
   particlesPerBreach:34,
-
-  // --- Power-ups ---
-  powerupChance:     0.085, // chance an enemy drops nothing-vs-powerup spawn tick
-  powerupInterval:   9,     // min seconds between power-up spawns
 };
 
-// Enemy archetypes. Add your own here — the spawner reads this table.
-// unlockScore = score at which this type starts appearing.
+// Enemy archetypes. unlockWave = wave at which this type starts appearing.
+// hpBase scales with wave at spawn time so damage upgrades stay relevant.
 const ENEMY_TYPES = {
-  grunt:    { hp:1, size:13, speedMul:1.0,  color:"#ff3d8b", value:10, unlockScore:0 },
-  fast:     { hp:1, size:10, speedMul:1.9,  color:"#ff7b3d", value:15, unlockScore:300 },
-  tank:     { hp:4, size:22, speedMul:0.55, color:"#b14dff", value:35, unlockScore:800 },
-  zigzag:   { hp:2, size:13, speedMul:1.1,  color:"#ffd23f", value:25, unlockScore:1500, wiggle:true },
-  splitter: { hp:2, size:18, speedMul:0.8,  color:"#3dff9e", value:30, unlockScore:2600, splits:true },
+  grunt:    { hp:2,  size:13, speedMul:1.0,  color:"#ff3d8b", value:10, xp:1, unlockWave:1 },
+  fast:     { hp:2,  size:10, speedMul:1.95, color:"#ff7b3d", value:15, xp:1, unlockWave:2 },
+  tank:     { hp:9,  size:23, speedMul:0.52, color:"#b14dff", value:35, xp:3, unlockWave:3 },
+  zigzag:   { hp:3,  size:13, speedMul:1.15, color:"#ffd23f", value:25, xp:2, unlockWave:4, wiggle:true },
+  splitter: { hp:4,  size:18, speedMul:0.85, color:"#3dff9e", value:30, xp:2, unlockWave:5, splits:true },
+  boss:     { hp:80, size:46, speedMul:0.42, color:"#ff2d6b", value:300, xp:25, unlockWave:99, boss:true },
 };
-
-// Power-up archetypes.
-const POWERUP_TYPES = ["rapid", "bomb", "heal", "multishot"];
 
 
 /* =================================================================
-   2. CANVAS SETUP  (handles high-DPI screens for crisp neon)
+   2. UPGRADE DECK  —  the build-defining choices on level up.
+   Each entry: id, name, icon, max level, dynamic description, and an
+   apply(p) that mutates the live player/core state so the effect is
+   immediately real in the simulation.
+   ================================================================= */
+const UPGRADES = [
+  { id:"firerate", name:"OVERCLOCK",     icon:"⚡", max:7, color:"#ffd23f",
+    desc:()=>"+16% fire rate",                 apply:p=>{ p.fireRate *= 0.84; } },
+  { id:"damage",   name:"HI-CAL ROUNDS",  icon:"🎯", max:9, color:"#ff7b3d",
+    desc:()=>"+1 projectile damage",           apply:p=>{ p.damage += 1; } },
+  { id:"multishot",name:"SPLIT BARREL",   icon:"🔱", max:5, color:"#38f5ff",
+    desc:()=>"+1 projectile per shot",         apply:p=>{ p.bulletCount += 1; } },
+  { id:"pierce",   name:"RAILGUN",        icon:"➡️", max:4, color:"#cffaff",
+    desc:()=>"Shots pierce +1 enemy",          apply:p=>{ p.pierce += 1; } },
+  { id:"bspeed",   name:"MAG ACCELERATOR",icon:"💨", max:4, color:"#38f5ff",
+    desc:()=>"+22% projectile speed",          apply:p=>{ p.bulletSpeed *= 1.22; p.bulletLife *= 1.1; } },
+  { id:"crit",     name:"TARGETING AI",   icon:"💢", max:5, color:"#ff3d8b",
+    desc:()=>"+9% crit chance (3x dmg)",        apply:p=>{ p.crit += 0.09; } },
+  { id:"explosive",name:"FRAG ROUNDS",    icon:"💥", max:4, color:"#ff7b3d",
+    desc:()=>"Hits explode (+AoE radius)",     apply:p=>{ p.explosive += 26; } },
+  { id:"chain",    name:"ARC COIL",       icon:"🌩️", max:4, color:"#38f5ff",
+    desc:()=>"Hits arc to +1 nearby enemy",    apply:p=>{ p.chain += 1; } },
+  { id:"drone",    name:"SENTRY DRONE",   icon:"🛰️", max:5, color:"#3dff9e",
+    desc:()=>"+1 orbiting auto-drone",         apply:p=>{ addDrone(); } },
+  { id:"maxhp",    name:"CORE PLATING",   icon:"🛡️", max:6, color:"#3dff9e",
+    desc:()=>"+25 max core HP (+heal 25)",     apply:p=>{ core.maxHp += 25; core.hp = Math.min(core.maxHp, core.hp + 25); } },
+  { id:"regen",    name:"NANOREPAIR",     icon:"➕", max:4, color:"#3dff9e",
+    desc:()=>"Core regenerates +0.7 HP/s",     apply:p=>{ core.regen += 0.7; } },
+  { id:"magnet",   name:"TRACTOR FIELD",  icon:"🧲", max:3, color:"#ffd23f",
+    desc:()=>"+55% XP pickup range",           apply:p=>{ p.magnet *= 1.55; } },
+  { id:"nova",     name:"PULSE REACTOR",  icon:"🔆", max:5, color:"#38f5ff",
+    desc:()=>"Auto-shockwave every few sec",   apply:p=>{ p.autoNova = p.autoNova ? p.autoNova*0.8 : 5.0; p.autoNovaTimer = p.autoNova; } },
+  { id:"slow",     name:"STASIS FIELD",   icon:"❄️", max:3, color:"#38f5ff",
+    desc:()=>"Slow enemies near the core",     apply:p=>{ p.slow += 0.16; } },
+  { id:"xpgain",   name:"DATA SIPHON",    icon:"📈", max:3, color:"#ffd23f",
+    desc:()=>"+25% XP gained",                 apply:p=>{ p.xpGain *= 1.25; } },
+  { id:"bigshot",  name:"HEAVY SLUG",     icon:"⚙️", max:4, color:"#b14dff",
+    desc:()=>"+40% projectile size & dmg",     apply:p=>{ p.bulletRadius *= 1.4; p.damage += 1; } },
+];
+
+
+/* =================================================================
+   3. CANVAS SETUP  (handles high-DPI screens for crisp neon)
    ================================================================= */
 const canvas = document.getElementById("game");
 const ctx    = canvas.getContext("2d");
 let W = 0, H = 0, CX = 0, CY = 0, DPR = 1;
 
 function resize() {
-  DPR = Math.min(window.devicePixelRatio || 1, 2); // cap DPR for perf
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
   W = window.innerWidth;
   H = window.innerHeight;
   canvas.width  = Math.floor(W * DPR);
   canvas.height = Math.floor(H * DPR);
   canvas.style.width  = W + "px";
   canvas.style.height = H + "px";
-  ctx.setTransform(DPR, 0, 0, DPR, 0, 0); // map drawing units to CSS px
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   CX = W / 2;
   CY = H / 2;
 }
@@ -161,61 +206,96 @@ resize();
 
 
 /* =================================================================
-   3. GAME STATE
+   4. GAME STATE
    ================================================================= */
-const STATE = { MENU:0, PLAYING:1, DEAD:2, PAUSED:3 };
+const STATE = { MENU:0, PLAYING:1, DEAD:2, PAUSED:3, LEVELUP:4 };
 let state = STATE.MENU;
 
-// NOTE: these are given starting values right here (not only inside
-// startGame) because render() runs during the MENU screen too, and it
-// iterates these arrays. Leaving them undefined crashes the first frame.
+let elapsedReal = 0;   // wall-clock time (UI blinking) — declared early on purpose
+
 let score = 0, combo = 0, comboTimer = 0, wave = 1, waveBannerTimer = 0;
-let coreHealth = CONFIG.coreMaxHealth, coreFlash = 0, corePulse = 0;
-let highScore = parseInt(localStorage.getItem("coreDefenderHi") || "0", 10);
+let highScore = parseInt(localStorage.getItem("coreDefenderHi2") || "0", 10);
 
-let enemies = [], bullets = [], particles = [], powerups = [], floaters = [];
-let spawnTimer = 0, fireTimer = 0, elapsed = 0, powerupTimer = 0;
+// Leveling
+let level = 1, xp = 0, xpNext = CONFIG.baseXpToLevel, pendingLevels = 0;
+let levelChoices = [];          // current 3 upgrade cards
+let cardAnim = 0;               // entrance animation for level-up screen
+const upgLevels = {};           // id -> current level taken
 
-// Player turret
-const turret = { angle:-Math.PI/2, desiredAngle:-Math.PI/2 };
+// Entity pools
+let enemies = [], bullets = [], particles = [], gems = [], floaters = [], shocks = [], beams = [];
+let drones = [];
+let spawnTimer = 0, elapsed = 0;
 
-// Active player buffs (timers in seconds; 0 = inactive)
-let buff = { rapid:0, multishot:0 };
+// The core we defend
+const core = { hp: CONFIG.coreMaxHealth, maxHp: CONFIG.coreMaxHealth, flash:0, pulse:0, regen:0 };
 
-// Screen-shake "trauma" — decays every frame; shake = trauma^2.
+// Player turret + all build stats
+const player = freshPlayer();
+function freshPlayer() {
+  return {
+    angle: -Math.PI/2, desiredAngle: -Math.PI/2, aimAngle: -Math.PI/2,
+    fireTimer: 0,
+    fireRate:     CONFIG.baseFireRate,
+    bulletSpeed:  CONFIG.baseBulletSpeed,
+    bulletLife:   CONFIG.baseBulletLife,
+    bulletRadius: CONFIG.baseBulletRadius,
+    damage:       CONFIG.baseDamage,
+    bulletCount:  1,
+    pierce:       0,
+    crit:         0,
+    explosive:    0,    // AoE radius on hit (0 = off)
+    chain:        0,    // # of arc jumps
+    slow:         0,    // fraction slow inside stasis field
+    magnet:       CONFIG.baseMagnet,
+    xpGain:       1,
+    autoNova:     0,    // interval seconds (0 = off)
+    autoNovaTimer:0,
+    novaTimer:    0,    // manual nova cooldown remaining
+  };
+}
+
+// Screen-shake / feel
 let trauma = 0;
-
-// --- "FEEL" STATE (added in the juice pass) ---
-let freezeTimer = 0;          // hit-stop: while > 0, gameplay sim is paused
-let flash = { t:0, max:0.18, color:"255,255,255" }; // full-screen flash on impact
-let muted = false;            // M toggles all sound
-
-// Per-run stats, shown on the death screen so players chase their best run.
-let stats = { kills:0, shotsFired:0, shotsHit:0, maxCombo:0, runTime:0 };
-
-// Background grid scroll offset (for subtle parallax life)
+let freezeTimer = 0;
+let flash = { t:0, max:0.18, color:"255,255,255", strength:0.5 };
+let muted = false;
 let gridPhase = 0;
+
+// Per-run stats
+let stats = { kills:0, shotsFired:0, shotsHit:0, maxCombo:0, runTime:0, bosses:0 };
 
 // Input
 const keys = {};
 const mouse = { x: CX, y: CY, down:false, active:false };
-let controlMode = "key"; // "key" or "mouse" — whichever was used last
+let controlMode = "key";
 
 
 /* =================================================================
-   4. INPUT HANDLING
+   5. INPUT HANDLING
    ================================================================= */
 window.addEventListener("keydown", (e) => {
   keys[e.code] = true;
   if (["ArrowLeft","ArrowRight","KeyA","KeyD"].includes(e.code)) controlMode = "key";
 
-  if (e.code === "Space") { e.preventDefault(); if (state === STATE.MENU) startGame(); }
+  if (e.code === "Space") {
+    e.preventDefault();
+    if (state === STATE.MENU) startGame();
+    else if (state === STATE.PLAYING) triggerNova();
+  }
   if (e.code === "KeyR" && state === STATE.DEAD) startGame();
   if (e.code === "KeyP") {
     if (state === STATE.PLAYING) state = STATE.PAUSED;
     else if (state === STATE.PAUSED) state = STATE.PLAYING;
   }
-  if (e.code === "KeyM") muted = !muted;   // toggle all sound
+  if (e.code === "KeyM") { muted = !muted; if (!muted) initAudio(); }
+
+  // Level-up selection by number keys.
+  if (state === STATE.LEVELUP) {
+    if (e.code === "Digit1" || e.code === "Numpad1") chooseUpgrade(0);
+    if (e.code === "Digit2" || e.code === "Numpad2") chooseUpgrade(1);
+    if (e.code === "Digit3" || e.code === "Numpad3") chooseUpgrade(2);
+  }
 });
 window.addEventListener("keyup", (e) => { keys[e.code] = false; });
 
@@ -228,18 +308,22 @@ canvas.addEventListener("mousemove", (e) => {
 });
 canvas.addEventListener("mousedown", () => {
   mouse.down = true;
-  if (state === STATE.MENU)  startGame();
-  if (state === STATE.DEAD)  startGame();
+  if (state === STATE.MENU)  { startGame(); return; }
+  if (state === STATE.DEAD)  { startGame(); return; }
+  if (state === STATE.LEVELUP) { clickCard(); return; }
+  if (state === STATE.PLAYING) triggerNova();
 });
 window.addEventListener("mouseup", () => { mouse.down = false; });
 
-// Touch support (mobile-friendly): drag to aim, hold to fire.
+// Touch support: drag to position, tap to nova / pick cards.
 canvas.addEventListener("touchstart", (e) => {
   e.preventDefault();
   const t = e.touches[0], r = canvas.getBoundingClientRect();
   mouse.x = t.clientX - r.left; mouse.y = t.clientY - r.top;
   mouse.down = true; controlMode = "mouse";
-  if (state === STATE.MENU || state === STATE.DEAD) startGame();
+  if (state === STATE.MENU || state === STATE.DEAD) { startGame(); return; }
+  if (state === STATE.LEVELUP) { clickCard(); return; }
+  if (state === STATE.PLAYING) triggerNova();
 }, { passive:false });
 canvas.addEventListener("touchmove", (e) => {
   e.preventDefault();
@@ -250,15 +334,9 @@ canvas.addEventListener("touchend", (e) => { e.preventDefault(); mouse.down = fa
 
 
 /* =================================================================
-   4b. PROCEDURAL SOUND ENGINE  (no audio files — all synthesized)
-   -----------------------------------------------------------------
-   The Web Audio API lets us generate every sound effect on the fly
-   from oscillators + noise, so the game stays a single self-contained
-   file. The AudioContext must be created/resumed after a user gesture
-   (browser autoplay policy), so we lazily init on first input.
+   6. PROCEDURAL SOUND ENGINE  (all synthesized — no audio files)
    ================================================================= */
-let actx = null;       // the AudioContext (created on first interaction)
-let masterGain = null; // global volume + mute bus
+let actx = null, masterGain = null, musicGain = null;
 
 function initAudio() {
   if (actx) { if (actx.state === "suspended") actx.resume(); return; }
@@ -266,16 +344,17 @@ function initAudio() {
   if (!AC) return;
   actx = new AC();
   masterGain = actx.createGain();
-  masterGain.gain.value = 0.5;          // overall volume (tweak 0..1)
+  masterGain.gain.value = 0.5;
   masterGain.connect(actx.destination);
+  musicGain = actx.createGain();
+  musicGain.gain.value = 0.18;
+  musicGain.connect(masterGain);
 }
-// Any gesture wakes the audio engine.
 window.addEventListener("mousedown", initAudio);
 window.addEventListener("keydown", initAudio);
 window.addEventListener("touchstart", initAudio);
 
-// Play a quick tone. type: oscillator wave; freq sweeps from f0 -> f1.
-function tone(f0, f1, dur, type = "square", vol = 0.3) {
+function tone(f0, f1, dur, type = "square", vol = 0.3, dest = null) {
   if (!actx || muted) return;
   const t = actx.currentTime;
   const osc = actx.createOscillator();
@@ -284,19 +363,17 @@ function tone(f0, f1, dur, type = "square", vol = 0.3) {
   osc.frequency.setValueAtTime(f0, t);
   osc.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
   g.gain.setValueAtTime(vol, t);
-  g.gain.exponentialRampToValueAtTime(0.0001, t + dur); // fast decay
-  osc.connect(g); g.connect(masterGain);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.connect(g); g.connect(dest || masterGain);
   osc.start(t); osc.stop(t + dur);
 }
-
-// Filtered noise burst — used for explosions / impacts.
 function noise(dur, cutoff = 1200, vol = 0.4) {
   if (!actx || muted) return;
   const t = actx.currentTime;
   const n = Math.floor(actx.sampleRate * dur);
   const buf = actx.createBuffer(1, n, actx.sampleRate);
   const d = buf.getChannelData(0);
-  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n); // decaying
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
   const src = actx.createBufferSource(); src.buffer = buf;
   const lp = actx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = cutoff;
   const g  = actx.createGain(); g.gain.value = vol;
@@ -304,328 +381,517 @@ function noise(dur, cutoff = 1200, vol = 0.4) {
   src.start(t);
 }
 
-// Named SFX — call these from gameplay code.
 const SFX = {
-  shoot:   () => tone(880, 420, 0.07, "square", 0.12),
-  hit:     () => tone(300, 200, 0.05, "square", 0.10),
-  kill:    () => { tone(180, 90, 0.18, "sawtooth", 0.18); noise(0.18, 1800, 0.18); },
-  breach:  () => { tone(120, 40, 0.45, "sine", 0.5); noise(0.5, 500, 0.5); },
-  powerup: () => { tone(520, 1040, 0.18, "triangle", 0.25); tone(780, 1560, 0.22, "triangle", 0.15); },
+  shoot:   () => tone(820, 380, 0.06, "square", 0.07),
+  hit:     () => tone(320, 210, 0.04, "square", 0.07),
+  crit:    () => { tone(1200, 500, 0.09, "square", 0.12); },
+  kill:    () => { tone(180, 90, 0.16, "sawtooth", 0.14); noise(0.14, 1800, 0.14); },
+  explode: () => { tone(120, 50, 0.2, "sawtooth", 0.2); noise(0.25, 900, 0.22); },
+  nova:    () => { tone(160, 1000, 0.25, "triangle", 0.22); noise(0.3, 2400, 0.18); },
+  gem:     () => tone(900, 1500, 0.05, "triangle", 0.06),
+  breach:  () => { tone(120, 40, 0.45, "sine", 0.45); noise(0.5, 500, 0.45); },
+  levelup: () => { [523,659,784,1046].forEach((f,i)=>setTimeout(()=>tone(f,f*1.5,0.18,"triangle",0.2),i*70)); },
+  pick:    () => { tone(660, 1320, 0.12, "triangle", 0.2); tone(990, 1980, 0.16, "triangle", 0.12); },
+  boss:    () => { tone(80, 60, 0.8, "sawtooth", 0.4); noise(0.8, 400, 0.35); },
   gameover:() => { tone(220, 30, 1.1, "sawtooth", 0.4); noise(1.1, 700, 0.4); },
 };
 
+// --- Lightweight background music: a pulsing bass + arp, scheduled on a timer.
+const MUSIC_BASS = [55, 55, 73.42, 65.41];           // A1 A1 D2 C2
+const MUSIC_ARP  = [220, 261.63, 329.63, 392, 329.63, 261.63];
+let musicStep = 0;
+setInterval(() => {
+  if (!actx || muted || state !== STATE.PLAYING) return;
+  const bass = MUSIC_BASS[Math.floor(musicStep / 4) % MUSIC_BASS.length];
+  tone(bass, bass, 0.45, "sawtooth", 0.10, musicGain);
+  if (musicStep % 2 === 0) {
+    const a = MUSIC_ARP[musicStep % MUSIC_ARP.length];
+    tone(a, a, 0.18, "square", 0.045, musicGain);
+  }
+  musicStep++;
+}, 220);
+
 
 /* =================================================================
-   5. UTILITY HELPERS
+   7. UTILITY HELPERS
    ================================================================= */
 const rand  = (a, b) => a + Math.random() * (b - a);
 const randi = (a, b) => Math.floor(rand(a, b + 1));
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const TAU   = Math.PI * 2;
 
-// Shortest-path interpolation between two angles (handles wrap-around).
 function lerpAngle(from, to, t) {
   let diff = ((to - from + Math.PI) % TAU) - Math.PI;
   if (diff < -Math.PI) diff += TAU;
   return from + diff * t;
 }
-
-function addShake(amount) { trauma = clamp(trauma + amount, 0, 1); }
-
-// Hit-stop: briefly freeze the gameplay sim so impacts read as weighty.
-function hitStop(seconds) { freezeTimer = Math.max(freezeTimer, seconds); }
-
-// Trigger a full-screen color flash that decays over its duration.
+function addShake(a) { trauma = clamp(trauma + a, 0, 1); }
+function hitStop(s)  { freezeTimer = Math.max(freezeTimer, s); }
 function screenFlash(color, dur = 0.18, strength = 0.5) {
   flash.color = color; flash.max = dur; flash.t = dur; flash.strength = strength;
+}
+// Rounded rectangle path helper (for glossy UI panels).
+function roundRectPath(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y,     x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x,     y + h, r);
+  ctx.arcTo(x,     y + h, x,     y,     r);
+  ctx.arcTo(x,     y,     x + w, y,     r);
+  ctx.closePath();
 }
 
 
 /* =================================================================
-   6. SPAWNERS / FACTORIES
+   8. SPAWNERS / FACTORIES
    ================================================================= */
-// Pick a random enemy type that's currently unlocked by score.
 function pickEnemyType() {
-  const pool = Object.keys(ENEMY_TYPES).filter(k => score >= ENEMY_TYPES[k].unlockScore);
-  // Weight toward harder types as score rises, but keep grunts common.
-  return pool[randi(0, pool.length - 1)];
+  // Weighted pool: grunts stay common, harder types get more likely later.
+  const pool = [];
+  for (const k in ENEMY_TYPES) {
+    const t = ENEMY_TYPES[k];
+    if (t.boss || wave < t.unlockWave) continue;
+    let weight = 1;
+    if (k === "grunt") weight = 3;
+    if (k === "fast")  weight = 2 + Math.floor(wave / 4);
+    if (k === "tank")  weight = 1 + Math.floor(wave / 6);
+    if (k === "zigzag")weight = 1 + Math.floor(wave / 6);
+    if (k === "splitter") weight = 1 + Math.floor(wave / 8);
+    for (let i = 0; i < weight; i++) pool.push(k);
+  }
+  return pool[randi(0, pool.length - 1)] || "grunt";
+}
+
+function edgePoint(m = 40) {
+  const edge = randi(0, 3);
+  if (edge === 0) return { x: rand(-m, W+m), y: -m };
+  if (edge === 1) return { x: W+m, y: rand(-m, H+m) };
+  if (edge === 2) return { x: rand(-m, W+m), y: H+m };
+  return { x: -m, y: rand(-m, H+m) };
 }
 
 function spawnEnemy(typeName, atX, atY) {
   const t = ENEMY_TYPES[typeName];
-  // Spawn just off the edge of the screen, aimed at the core.
   let x, y;
   if (atX !== undefined) { x = atX; y = atY; }
-  else {
-    const edge = randi(0, 3), m = 40;
-    if (edge === 0) { x = rand(-m, W+m); y = -m; }
-    else if (edge === 1) { x = W+m; y = rand(-m, H+m); }
-    else if (edge === 2) { x = rand(-m, W+m); y = H+m; }
-    else { x = -m; y = rand(-m, H+m); }
-  }
+  else { const p = edgePoint(); x = p.x; y = p.y; }
+  // Wave-scaled HP so the build matters across a run.
+  const hpScale = 1 + Math.max(0, wave - 1) * (t.boss ? 0.5 : 0.14);
+  const hp = Math.ceil(t.hp * hpScale);
   enemies.push({
     type: typeName, x, y,
-    hp: t.hp, size: t.size, color: t.color, value: t.value,
-    speedMul: t.speedMul,
-    wiggle: !!t.wiggle, splits: !!t.splits,
-    wigglePhase: rand(0, TAU),
-    rot: rand(0, TAU), rotSpeed: rand(-3, 3),
-    flash: 0,
+    hp, maxHp: hp, size: t.size, color: t.color, value: t.value, xp: t.xp,
+    speedMul: t.speedMul, wiggle: !!t.wiggle, splits: !!t.splits, boss: !!t.boss,
+    wigglePhase: rand(0, TAU), rot: rand(0, TAU), rotSpeed: rand(-3, 3),
+    flash: 0, slowT: 0,
   });
 }
 
-function spawnPowerup() {
-  const kind = POWERUP_TYPES[randi(0, POWERUP_TYPES.length - 1)];
-  const edge = randi(0, 3), m = 40;
-  let x, y;
-  if (edge === 0) { x = rand(W*0.2, W*0.8); y = -m; }
-  else if (edge === 1) { x = W+m; y = rand(H*0.2, H*0.8); }
-  else if (edge === 2) { x = rand(W*0.2, W*0.8); y = H+m; }
-  else { x = -m; y = rand(H*0.2, H*0.8); }
-  powerups.push({ kind, x, y, rot:0, pulse:0 });
+function spawnBoss() {
+  const p = edgePoint(60);
+  spawnEnemy("boss", p.x, p.y);
+  waveBannerTimer = 2.2;
+  screenFlash("255,45,107", 0.4, 0.5);
+  addShake(0.4);
+  SFX.boss();
+  floatBanner = { text: "⚠ BOSS INCOMING ⚠", t: 2.2, color: "#ff2d6b" };
 }
 
-// Particle burst — the heart of the "juice".
+function addDrone() {
+  const n = drones.length;
+  drones.push({
+    angle: rand(0, TAU), radius: CONFIG.orbitRadius + 52 + n * 6,
+    speed: 1.4 + n * 0.05, fireTimer: 0, pulse: 0,
+  });
+}
+
 function burst(x, y, color, count, power = 1) {
   for (let i = 0; i < count; i++) {
     const a = rand(0, TAU), sp = rand(40, 320) * power;
     particles.push({
-      x, y,
-      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
-      life: rand(0.3, 0.8), maxLife: 0.8,
-      size: rand(2, 5), color,
+      x, y, vx: Math.cos(a)*sp, vy: Math.sin(a)*sp,
+      life: rand(0.3, 0.8), maxLife: 0.8, size: rand(2, 5), color,
     });
   }
 }
-
-// Floating score text (e.g. "+30 x3").
-function floatText(x, y, text, color) {
-  floaters.push({ x, y, text, color, life: 0.9, vy: -42 });
+function floatText(x, y, text, color, size = 18) {
+  floaters.push({ x, y, text, color, life: 0.9, vy: -42, size });
 }
+function spawnGem(x, y, value) {
+  gems.push({ x, y, value, vx: rand(-40,40), vy: rand(-40,40), pulse: rand(0,TAU), collected:false });
+}
+function spawnShock(x, y, radius, color, damage, dealt) {
+  shocks.push({ x, y, r: 0, max: radius, life: 0.45, maxLife: 0.45, color, damage, dealt: dealt !== false ? new Set() : null });
+}
+
+let floatBanner = null; // big transient banner (boss, etc.)
 
 
 /* =================================================================
-   7. FIRING
+   9. FIRING (AUTO-TARGETING) + ABILITIES
    ================================================================= */
-function fire() {
-  // Turret position sits on the orbit ring around the core.
-  const tx = CX + Math.cos(turret.angle) * CONFIG.orbitRadius;
-  const ty = CY + Math.sin(turret.angle) * CONFIG.orbitRadius;
-  // Bullets travel OUTWARD, away from the core (that's the aim direction).
-  const baseDir = turret.angle;
+function turretPos() {
+  return { x: CX + Math.cos(player.angle) * CONFIG.orbitRadius,
+           y: CY + Math.sin(player.angle) * CONFIG.orbitRadius };
+}
 
-  // Multishot buff fires a 3-bullet spread.
-  const shots = buff.multishot > 0 ? [-0.16, 0, 0.16] : [0];
-  for (const off of shots) {
-    const d = baseDir + off;
+function nearestEnemy(x, y, maxDist = Infinity, exclude = null) {
+  let best = null, bd = maxDist * maxDist;
+  for (const e of enemies) {
+    if (e === exclude) continue;
+    const d = (e.x - x) ** 2 + (e.y - y) ** 2;
+    if (d < bd) { bd = d; best = e; }
+  }
+  return best;
+}
+
+function fire() {
+  const { x: tx, y: ty } = turretPos();
+  const target = nearestEnemy(tx, ty);
+  // Aim at the target; if none, aim outward along orbit.
+  const aim = target ? Math.atan2(target.y - ty, target.x - tx) : player.angle;
+  player.aimAngle = lerpAngle(player.aimAngle, aim, 0.6);
+
+  const count = player.bulletCount;
+  const spreadTotal = count > 1 ? Math.min(0.5, 0.12 * (count - 1)) : 0;
+  for (let i = 0; i < count; i++) {
+    const off = count > 1 ? -spreadTotal/2 + spreadTotal * (i/(count-1)) : 0;
+    const d = player.aimAngle + off;
+    const crit = Math.random() < player.crit;
     bullets.push({
       x: tx, y: ty,
-      vx: Math.cos(d) * CONFIG.bulletSpeed,
-      vy: Math.sin(d) * CONFIG.bulletSpeed,
-      life: CONFIG.bulletLife,
+      vx: Math.cos(d) * player.bulletSpeed,
+      vy: Math.sin(d) * player.bulletSpeed,
+      life: player.bulletLife,
+      dmg: player.damage * (crit ? 3 : 1),
+      crit, r: player.bulletRadius,
+      pierce: player.pierce, hit: null,
     });
   }
-  // Muzzle spark.
-  burst(tx, ty, CONFIG.bulletSpeed && "#cffaff", 3, 0.4);
-  stats.shotsFired += shots.length;
+  burst(tx, ty, "#cffaff", 3, 0.4);
+  stats.shotsFired += count;
   SFX.shoot();
 }
 
+function triggerNova() {
+  if (player.novaTimer > 0) return;
+  player.novaTimer = CONFIG.novaCooldown;
+  spawnShock(CX, CY, CONFIG.novaRadius, "#38f5ff", CONFIG.novaDamage);
+  addShake(0.35);
+  screenFlash("56,245,255", 0.18, 0.4);
+  SFX.nova();
+}
+
 
 /* =================================================================
-   8. GAME LIFECYCLE
+   10. LEVEL-UP / UPGRADE SYSTEM
+   ================================================================= */
+function gainXp(amount) {
+  xp += amount * player.xpGain;
+  while (xp >= xpNext) {
+    xp -= xpNext;
+    level++;
+    pendingLevels++;
+    xpNext = Math.ceil(xpNext * CONFIG.xpCurve) + 2;
+  }
+  if (pendingLevels > 0 && state === STATE.PLAYING) openLevelUp();
+}
+
+function openLevelUp() {
+  // Build pool of upgrades not yet maxed.
+  const avail = UPGRADES.filter(u => (upgLevels[u.id] || 0) < u.max);
+  // Shuffle & pick 3 (or fewer if pool is small).
+  for (let i = avail.length - 1; i > 0; i--) {
+    const j = randi(0, i);
+    [avail[i], avail[j]] = [avail[j], avail[i]];
+  }
+  levelChoices = avail.slice(0, 3);
+  cardAnim = 0;
+  state = STATE.LEVELUP;
+  SFX.levelup();
+}
+
+function chooseUpgrade(index) {
+  const u = levelChoices[index];
+  if (!u) return;
+  upgLevels[u.id] = (upgLevels[u.id] || 0) + 1;
+  u.apply(player);
+  pendingLevels--;
+  SFX.pick();
+  floatText(CX, CY - 40, u.name + " LV" + upgLevels[u.id], u.color, 22);
+  if (pendingLevels > 0) openLevelUp();   // chain multiple level-ups
+  else state = STATE.PLAYING;
+}
+
+// Hit-test the three level-up cards against the cursor.
+function cardRects() {
+  const cw = Math.min(260, (W - 80) / 3), ch = 320, gap = 24;
+  const totalW = cw * 3 + gap * 2;
+  const x0 = CX - totalW / 2, y0 = CY - ch / 2 + 20;
+  return levelChoices.map((u, i) => ({ x: x0 + i * (cw + gap), y: y0, w: cw, h: ch, u, i }));
+}
+function clickCard() {
+  for (const r of cardRects()) {
+    if (mouse.x >= r.x && mouse.x <= r.x + r.w && mouse.y >= r.y && mouse.y <= r.y + r.h) {
+      chooseUpgrade(r.i); return;
+    }
+  }
+}
+
+
+/* =================================================================
+   11. GAME LIFECYCLE
    ================================================================= */
 function startGame() {
   score = 0; combo = 0; comboTimer = 0;
   wave = 1; waveBannerTimer = 1.6;
-  coreHealth = CONFIG.coreMaxHealth; coreFlash = 0; corePulse = 0;
-  enemies = []; bullets = []; particles = []; powerups = []; floaters = [];
-  spawnTimer = 0.6; fireTimer = 0; elapsed = 0; powerupTimer = CONFIG.powerupInterval;
-  buff = { rapid:0, multishot:0 };
+  level = 1; xp = 0; xpNext = CONFIG.baseXpToLevel; pendingLevels = 0;
+  for (const k in upgLevels) delete upgLevels[k];
+  core.hp = core.maxHp = CONFIG.coreMaxHealth; core.flash = 0; core.pulse = 0; core.regen = 0;
+  enemies = []; bullets = []; particles = []; gems = []; floaters = []; shocks = []; beams = []; drones = [];
+  spawnTimer = 0.6; elapsed = 0;
+  Object.assign(player, freshPlayer());
   trauma = 0; freezeTimer = 0; flash.t = 0;
-  stats = { kills:0, shotsFired:0, shotsHit:0, maxCombo:0, runTime:0 };
-  turret.angle = turret.desiredAngle = -Math.PI/2;
+  floatBanner = null;
+  stats = { kills:0, shotsFired:0, shotsHit:0, maxCombo:0, runTime:0, bosses:0 };
   state = STATE.PLAYING;
 }
 
 function gameOver() {
   state = STATE.DEAD;
   stats.runTime = elapsed;
-  if (score > highScore) {
-    highScore = score;
-    localStorage.setItem("coreDefenderHi", String(highScore));
-  }
+  if (score > highScore) { highScore = score; localStorage.setItem("coreDefenderHi2", String(highScore)); }
   addShake(0.9);
-  screenFlash("255,61,139", 0.4, 0.8);   // pink death flash
-  hitStop(0.12);                         // dramatic freeze on death
+  screenFlash("255,61,139", 0.4, 0.8);
+  hitStop(0.12);
   SFX.gameover();
-  burst(CX, CY, "#38f5ff", 60, 2);       // core explodes
+  burst(CX, CY, "#38f5ff", 70, 2.2);
 }
 
 
 /* =================================================================
-   9. UPDATE  (all simulation, dt = delta time in seconds)
+   12. UPDATE  (all simulation, dt = delta time in seconds)
    ================================================================= */
 function update(dt) {
-  // Background life always animates a little.
   gridPhase += dt * 8;
-  trauma = Math.max(0, trauma - dt * 1.4); // trauma decays smoothly
-  if (flash.t > 0) flash.t = Math.max(0, flash.t - dt); // flash always fades
+  trauma = Math.max(0, trauma - dt * 1.4);
+  if (flash.t > 0) flash.t = Math.max(0, flash.t - dt);
 
+  // Particles & shocks animate even when paused-ish? Keep them to PLAYING.
   if (state !== STATE.PLAYING) return;
-
-  // HIT-STOP: freeze the gameplay sim for a few frames after big impacts.
-  // We still return here so render() keeps drawing (and shake stays lively),
-  // but no positions/timers advance — that micro-pause is what sells weight.
   if (freezeTimer > 0) { freezeTimer = Math.max(0, freezeTimer - dt); return; }
 
   elapsed += dt;
-  corePulse += dt;
-  coreFlash = Math.max(0, coreFlash - dt * 3);
+  core.pulse += dt;
+  core.flash = Math.max(0, core.flash - dt * 3);
 
-  // ---- DIFFICULTY CURVE -------------------------------------------------
-  // Difficulty rises with elapsed time. Spawn gets faster, enemies faster.
-  const diff = elapsed / CONFIG.difficultyRamp;            // grows over time
-  const spawnInterval = Math.max(CONFIG.minSpawnInterval,
-                                 CONFIG.baseSpawnInterval / (1 + diff));
-  const enemySpeed = CONFIG.baseEnemySpeed * (1 + diff * 0.9);
+  // Core passive regen.
+  if (core.regen > 0 && core.hp > 0) core.hp = Math.min(core.maxHp, core.hp + core.regen * dt);
 
-  // Wave counter ticks up roughly every 20s for flavor + escalation banners.
-  const newWave = 1 + Math.floor(elapsed / 20);
-  if (newWave > wave) { wave = newWave; waveBannerTimer = 1.6; }
+  // ---- DIFFICULTY CURVE ----
+  const diff = elapsed / CONFIG.difficultyRamp;
+  const spawnInterval = Math.max(CONFIG.minSpawnInterval, CONFIG.baseSpawnInterval / (1 + diff * 0.8));
+  const enemySpeed = CONFIG.baseEnemySpeed * (1 + diff * 0.7);
+
+  // ---- WAVES ----
+  const newWave = 1 + Math.floor(elapsed / CONFIG.waveSeconds);
+  if (newWave > wave) {
+    wave = newWave;
+    waveBannerTimer = 1.6;
+    if (wave % CONFIG.bossEveryWaves === 0) { spawnBoss(); stats.bosses++; }
+  }
   waveBannerTimer = Math.max(0, waveBannerTimer - dt);
+  if (floatBanner) { floatBanner.t -= dt; if (floatBanner.t <= 0) floatBanner = null; }
 
-  // ---- TURRET CONTROL ---------------------------------------------------
+  // ---- TURRET CONTROL ----
   if (controlMode === "key") {
     let dir = 0;
     if (keys.ArrowLeft  || keys.KeyA) dir -= 1;
     if (keys.ArrowRight || keys.KeyD) dir += 1;
-    turret.angle += dir * CONFIG.rotateSpeed * dt;
+    player.angle += dir * CONFIG.rotateSpeed * dt;
   } else {
-    // Aim toward the mouse: the desired turret angle is the angle from the
-    // core to the cursor, so the turret orbits to "face" the cursor.
-    turret.desiredAngle = Math.atan2(mouse.y - CY, mouse.x - CX);
-    turret.angle = lerpAngle(turret.angle, turret.desiredAngle,
-                             clamp(CONFIG.mouseAimLerp * dt, 0, 1));
+    player.desiredAngle = Math.atan2(mouse.y - CY, mouse.x - CX);
+    player.angle = lerpAngle(player.angle, player.desiredAngle, clamp(CONFIG.mouseAimLerp * dt, 0, 1));
   }
-  turret.angle = (turret.angle + TAU) % TAU;
+  player.angle = (player.angle + TAU) % TAU;
 
-  // ---- FIRING -----------------------------------------------------------
-  for (const k in buff) buff[k] = Math.max(0, buff[k] - dt);
-  const effFireRate = buff.rapid > 0 ? CONFIG.fireRate * 0.4 : CONFIG.fireRate;
-  fireTimer -= dt;
-  const wantFire = keys.Space || mouse.down;
-  if (wantFire && fireTimer <= 0) { fire(); fireTimer = effFireRate; }
+  // ---- AUTO-FIRE ----
+  player.fireTimer -= dt;
+  if (player.fireTimer <= 0 && enemies.length > 0) { fire(); player.fireTimer = player.fireRate; }
 
-  // ---- COMBO TIMER ------------------------------------------------------
+  // ---- NOVA cooldowns ----
+  if (player.novaTimer > 0) player.novaTimer = Math.max(0, player.novaTimer - dt);
+  if (player.autoNova > 0) {
+    player.autoNovaTimer -= dt;
+    if (player.autoNovaTimer <= 0) {
+      player.autoNovaTimer = player.autoNova;
+      spawnShock(CX, CY, CONFIG.novaRadius * 0.85, "#38f5ff", CONFIG.novaDamage);
+      SFX.nova();
+    }
+  }
+
+  // ---- COMBO ----
   if (comboTimer > 0) { comboTimer -= dt; if (comboTimer <= 0) combo = 0; }
 
-  // ---- SPAWNING ---------------------------------------------------------
+  // ---- SPAWNING ----
   spawnTimer -= dt;
   if (spawnTimer <= 0) {
     spawnTimer = spawnInterval;
     spawnEnemy(pickEnemyType());
-    // At higher difficulty, occasionally spawn a bonus pair.
-    if (diff > 1.2 && Math.random() < 0.3) spawnEnemy(pickEnemyType());
-  }
-  powerupTimer -= dt;
-  if (powerupTimer <= 0 && Math.random() < CONFIG.powerupChance * 3) {
-    powerupTimer = CONFIG.powerupInterval;
-    spawnPowerup();
+    if (diff > 1.2 && Math.random() < 0.35) spawnEnemy(pickEnemyType());
+    if (diff > 2.5 && Math.random() < 0.3)  spawnEnemy(pickEnemyType());
   }
 
-  // ---- UPDATE ENEMIES ---------------------------------------------------
+  // ---- DRONES (orbit + auto-fire) ----
+  for (const dr of drones) {
+    dr.angle += dr.speed * dt;
+    dr.pulse += dt;
+    dr.fireTimer -= dt;
+    const dx = CX + Math.cos(dr.angle) * dr.radius;
+    const dy = CY + Math.sin(dr.angle) * dr.radius;
+    dr.x = dx; dr.y = dy;
+    if (dr.fireTimer <= 0 && enemies.length > 0) {
+      const tgt = nearestEnemy(dx, dy);
+      if (tgt) {
+        const a = Math.atan2(tgt.y - dy, tgt.x - dx);
+        bullets.push({
+          x: dx, y: dy, vx: Math.cos(a)*player.bulletSpeed*0.9, vy: Math.sin(a)*player.bulletSpeed*0.9,
+          life: player.bulletLife, dmg: Math.max(1, Math.round(player.damage*0.7)), crit:false,
+          r: player.bulletRadius*0.8, pierce: 0, hit: null, drone:true,
+        });
+        dr.fireTimer = player.fireRate * 1.5;
+      }
+    }
+  }
+
+  // ---- ENEMIES ----
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
     let dx = CX - e.x, dy = CY - e.y;
     const dist = Math.hypot(dx, dy) || 1;
     dx /= dist; dy /= dist;
 
-    // Zigzag enemies weave perpendicular to their travel direction.
     let mvx = dx, mvy = dy;
     if (e.wiggle) {
       e.wigglePhase += dt * 6;
-      const perpX = -dy, perpY = dx;
       const w = Math.sin(e.wigglePhase) * 0.7;
-      mvx += perpX * w; mvy += perpY * w;
+      mvx += -dy * w; mvy += dx * w;
       const n = Math.hypot(mvx, mvy) || 1; mvx /= n; mvy /= n;
     }
 
-    const sp = enemySpeed * e.speedMul;
+    // Stasis field: enemies within range of the core are slowed.
+    let slowFactor = 1;
+    if (player.slow > 0 && dist < CONFIG.novaRadius * 0.7) {
+      slowFactor = 1 - Math.min(0.85, player.slow);
+      e.slowT = 0.1;
+    }
+
+    const sp = enemySpeed * e.speedMul * slowFactor;
     e.x += mvx * sp * dt;
     e.y += mvy * sp * dt;
     e.rot += e.rotSpeed * dt;
     e.flash = Math.max(0, e.flash - dt * 5);
+    if (e.slowT > 0) e.slowT -= dt;
 
-    // Breached the core?
     if (dist < CONFIG.coreRadius + e.size) {
-      coreHealth -= CONFIG.coreDamagePerHit;
-      coreFlash = 1;
+      core.hp -= e.boss ? CONFIG.coreDamagePerHit * 3 : CONFIG.coreDamagePerHit;
+      core.flash = 1;
       addShake(CONFIG.shakeOnHit);
-      screenFlash("255,61,139", 0.16, 0.45); // pink edge flash on breach
-      hitStop(0.05);                          // small freeze for impact weight
+      screenFlash("255,61,139", 0.16, 0.45);
+      hitStop(0.05);
       SFX.breach();
       burst(e.x, e.y, e.color, CONFIG.particlesPerBreach, 1.5);
       enemies.splice(i, 1);
-      combo = 0; // breaching breaks your combo — keep them out!
-      if (coreHealth <= 0) { coreHealth = 0; gameOver(); return; }
+      combo = 0;
+      if (core.hp <= 0) { core.hp = 0; gameOver(); return; }
     }
   }
 
-  // ---- UPDATE BULLETS + COLLISIONS -------------------------------------
+  // ---- BULLETS + COLLISIONS ----
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
     b.x += b.vx * dt; b.y += b.vy * dt;
     b.life -= dt;
-    // Cull if dead or off-screen.
-    if (b.life <= 0 || b.x < -50 || b.x > W+50 || b.y < -50 || b.y > H+50) {
+    if (b.life <= 0 || b.x < -60 || b.x > W+60 || b.y < -60 || b.y > H+60) {
       bullets.splice(i, 1); continue;
     }
-    // Test against every enemy.
     for (let j = enemies.length - 1; j >= 0; j--) {
       const e = enemies[j];
-      if (Math.hypot(b.x - e.x, b.y - e.y) < e.size + CONFIG.bulletRadius) {
-        bullets.splice(i, 1);
-        e.hp -= 1; e.flash = 1;
-        stats.shotsHit += 1;
-        burst(b.x, b.y, e.color, 4, 0.5);
-        if (e.hp <= 0) killEnemy(j);
-        else SFX.hit();
+      if (e === b.hit) continue;
+      if (Math.hypot(b.x - e.x, b.y - e.y) < e.size + b.r) {
+        if (!b.drone) stats.shotsHit += 1;
+        damageEnemy(j, b.dmg, b.x, b.y, b.crit);
+        // Explosive AoE.
+        if (player.explosive > 0 && !b.drone) {
+          spawnShock(b.x, b.y, player.explosive, "#ff7b3d", Math.max(1, Math.round(b.dmg*0.6)));
+          SFX.explode();
+        }
+        // Chain lightning.
+        if (player.chain > 0 && !b.drone) doChain(e, b.dmg, player.chain);
+
+        if (b.pierce > 0) { b.pierce -= 1; b.hit = e; }
+        else { bullets.splice(i, 1); }
         break;
       }
     }
   }
 
-  // ---- UPDATE POWER-UPS -------------------------------------------------
-  for (let i = powerups.length - 1; i >= 0; i--) {
-    const p = powerups[i];
-    let dx = CX - p.x, dy = CY - p.y;
-    const dist = Math.hypot(dx, dy) || 1;
-    p.x += (dx / dist) * 70 * dt;
-    p.y += (dy / dist) * 70 * dt;
-    p.rot += dt * 2; p.pulse += dt * 6;
-
-    // Collected by shooting it.
-    let collected = false;
-    for (let j = bullets.length - 1; j >= 0; j--) {
-      const b = bullets[j];
-      if (Math.hypot(b.x - p.x, b.y - p.y) < 20) { bullets.splice(j,1); collected = true; break; }
+  // ---- SHOCKWAVES (nova / explosions) ----
+  for (let i = shocks.length - 1; i >= 0; i--) {
+    const s = shocks[i];
+    s.life -= dt;
+    s.r = s.max * (1 - s.life / s.maxLife);
+    if (s.dealt) {
+      for (let j = enemies.length - 1; j >= 0; j--) {
+        const e = enemies[j];
+        if (s.dealt.has(e)) continue;
+        if (Math.hypot(e.x - s.x, e.y - s.y) < s.r + e.size) {
+          s.dealt.add(e);
+          damageEnemy(j, s.damage, e.x, e.y, false);
+        }
+      }
     }
-    if (collected) { applyPowerup(p); powerups.splice(i, 1); continue; }
-    // Or lost if it reaches the core.
-    if (dist < CONFIG.coreRadius + 16) powerups.splice(i, 1);
+    if (s.life <= 0) shocks.splice(i, 1);
   }
 
-  // ---- UPDATE PARTICLES -------------------------------------------------
+  // ---- BEAMS (chain visuals) ----
+  for (let i = beams.length - 1; i >= 0; i--) {
+    beams[i].life -= dt;
+    if (beams[i].life <= 0) beams.splice(i, 1);
+  }
+
+  // ---- GEMS (XP pickups, magnet toward turret) ----
+  const tp = turretPos();
+  for (let i = gems.length - 1; i >= 0; i--) {
+    const g = gems[i];
+    g.pulse += dt * 6;
+    const dx = tp.x - g.x, dy = tp.y - g.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    if (dist < player.magnet) {
+      const pull = clamp(1 - dist / player.magnet, 0, 1);
+      g.vx += (dx / dist) * (300 + pull * 900) * dt;
+      g.vy += (dy / dist) * (300 + pull * 900) * dt;
+    }
+    g.vx *= 0.9; g.vy *= 0.9;
+    g.x += g.vx * dt; g.y += g.vy * dt;
+    if (dist < 22) {
+      gainXp(g.value);
+      burst(g.x, g.y, "#38f5ff", 5, 0.5);
+      SFX.gem();
+      gems.splice(i, 1);
+    }
+  }
+
+  // ---- PARTICLES ----
   for (let i = particles.length - 1; i >= 0; i--) {
     const p = particles[i];
     p.x += p.vx * dt; p.y += p.vy * dt;
-    p.vx *= 0.92; p.vy *= 0.92;       // drag for a snappy settle
+    p.vx *= 0.92; p.vy *= 0.92;
     p.life -= dt;
     if (p.life <= 0) particles.splice(i, 1);
   }
 
-  // ---- UPDATE FLOATING TEXT --------------------------------------------
+  // ---- FLOATERS ----
   for (let i = floaters.length - 1; i >= 0; i--) {
     const f = floaters[i];
     f.y += f.vy * dt; f.vy *= 0.94; f.life -= dt;
@@ -633,111 +899,114 @@ function update(dt) {
   }
 }
 
-// Handle an enemy death: scoring, combo, splitting, juice.
+// Apply damage to an enemy by index; handle death.
+function damageEnemy(index, dmg, hx, hy, crit) {
+  const e = enemies[index];
+  if (!e) return;
+  e.hp -= dmg;
+  e.flash = 1;
+  burst(hx, hy, e.color, crit ? 8 : 4, crit ? 0.9 : 0.5);
+  if (crit) { floatText(hx, hy - 8, "CRIT", "#ff3d8b", 14); SFX.crit(); }
+  if (e.hp <= 0) killEnemy(index);
+  else if (!crit) SFX.hit();
+}
+
+// Chain lightning: arc damage to nearby enemies.
+function doChain(from, dmg, jumps) {
+  let src = from;
+  const cdmg = Math.max(1, Math.round(dmg * 0.6));
+  for (let k = 0; k < jumps; k++) {
+    const next = nearestEnemy(src.x, src.y, 180, src);
+    if (!next) break;
+    beams.push({ x1: src.x, y1: src.y, x2: next.x, y2: next.y, life: 0.12, maxLife: 0.12 });
+    const idx = enemies.indexOf(next);
+    if (idx >= 0) damageEnemy(idx, cdmg, next.x, next.y, false);
+    src = next;
+  }
+}
+
 function killEnemy(index) {
   const e = enemies[index];
+  if (!e) return;
 
-  // Combo logic — chaining kills within the window ramps the multiplier.
-  if (comboTimer > 0) combo = Math.min(CONFIG.maxCombo, combo + 1);
-  else combo = 1;
-  comboTimer = CONFIG.comboWindow;
+  if (comboTimer > 0) combo = Math.min(20, combo + 1); else combo = 1;
+  comboTimer = 1.6;
 
   const gained = e.value * combo;
   score += gained;
   stats.kills += 1;
   if (combo > stats.maxCombo) stats.maxCombo = combo;
-  floatText(e.x, e.y, "+" + gained + (combo > 1 ? "  x" + combo : ""),
-            combo > 1 ? "#ffd23f" : "#ffffff");
+  floatText(e.x, e.y, "+" + gained + (combo > 1 ? " x" + combo : ""), combo > 1 ? "#ffd23f" : "#ffffff");
 
-  burst(e.x, e.y, e.color, CONFIG.particlesPerKill, 1);
-  addShake(CONFIG.shakeOnKill);
-  SFX.kill();
-  // Bigger enemies earn a tiny freeze-frame for extra punch.
-  if (e.size >= 20) hitStop(0.04);
+  // Drop XP gems (bosses drop a shower).
+  const gemCount = e.boss ? 12 : (e.xp || 1);
+  for (let i = 0; i < gemCount; i++) {
+    spawnGem(e.x + rand(-e.size, e.size), e.y + rand(-e.size, e.size), e.boss ? 3 : 1);
+  }
 
+  burst(e.x, e.y, e.color, e.boss ? 50 : CONFIG.particlesPerKill, e.boss ? 2 : 1);
+  addShake(e.boss ? 0.5 : CONFIG.shakeOnKill);
+  if (e.boss) { SFX.explode(); screenFlash("255,45,107", 0.3, 0.5); hitStop(0.1); floatText(e.x, e.y - 30, "BOSS DOWN!", "#ff2d6b", 24); }
+  else SFX.kill();
+  if (e.size >= 20 && !e.boss) hitStop(0.04);
+
+  const splits = e.splits, sx = e.x, sy = e.y;
   enemies.splice(index, 1);
-
-  // Splitters spawn two grunts where they died.
-  if (e.splits) {
-    spawnEnemy("grunt", e.x + rand(-10,10), e.y + rand(-10,10));
-    spawnEnemy("grunt", e.x + rand(-10,10), e.y + rand(-10,10));
+  if (splits) {
+    spawnEnemy("grunt", sx + rand(-10,10), sy + rand(-10,10));
+    spawnEnemy("grunt", sx + rand(-10,10), sy + rand(-10,10));
   }
 }
-
-function applyPowerup(p) {
-  floatText(p.x, p.y, powerupLabel(p.kind), "#3dff9e");
-  burst(p.x, p.y, "#3dff9e", 22, 1.2);
-  screenFlash("61,255,158", 0.15, 0.3);  // green pickup flash
-  SFX.powerup();
-  switch (p.kind) {
-    case "rapid":     buff.rapid = 6;     break;
-    case "multishot": buff.multishot = 8; break;
-    case "heal":      coreHealth = clamp(coreHealth + 25, 0, CONFIG.coreMaxHealth); break;
-    case "bomb":      // Clear the screen, score every enemy cleared.
-      addShake(0.5);
-      screenFlash("255,255,255", 0.22, 0.6);
-      for (let i = enemies.length - 1; i >= 0; i--) {
-        score += enemies[i].value;
-        burst(enemies[i].x, enemies[i].y, enemies[i].color, 8, 0.8);
-      }
-      enemies = [];
-      break;
-  }
-}
-function powerupLabel(k){return {rapid:"RAPID FIRE",bomb:"PURGE!",heal:"+REPAIR",multishot:"TRI-SHOT"}[k];}
-function powerupIcon(k){ return {rapid:"⚡",bomb:"💥",heal:"➕",multishot:"🔱"}[k]; }
 
 
 /* =================================================================
-   10. RENDER
+   13. RENDER  (pseudo-3D: shaded spheres, glossy panels, bloom)
    ================================================================= */
 function render() {
   ctx.clearRect(0, 0, W, H);
 
-  // --- SCREEN SHAKE ---
-  // shake = trauma^2 gives a punchy, non-linear feel. Apply as a translate.
   const shakeAmt = trauma * trauma * 22;
-  const sx = rand(-shakeAmt, shakeAmt);
-  const sy = rand(-shakeAmt, shakeAmt);
+  const sx = rand(-shakeAmt, shakeAmt), sy = rand(-shakeAmt, shakeAmt);
   ctx.save();
   ctx.translate(sx, sy);
 
   drawBackground();
+  drawStasisField();
   drawCore();
-  drawPowerups();
+  drawGems();
+  drawShocks();
   drawEnemies();
+  drawBeams();
   drawBullets();
+  drawDrones();
   drawTurret();
   drawParticles();
   drawFloaters();
 
-  ctx.restore();      // end shake
+  ctx.restore();
 
-  drawDamageVignette(); // red edge-glow that intensifies as the core weakens
-  drawFlash();          // full-screen impact flash
-  drawHUD();            // HUD is drawn un-shaken for readability
-  if (state === STATE.MENU)   drawMenu();
-  if (state === STATE.DEAD)   drawDeath();
-  if (state === STATE.PAUSED) drawPaused();
+  drawDamageVignette();
+  drawFlash();
+  drawHUD();
+  if (floatBanner) drawBigBanner();
+  if (state === STATE.MENU)    drawMenu();
+  if (state === STATE.DEAD)    drawDeath();
+  if (state === STATE.PAUSED)  drawPaused();
+  if (state === STATE.LEVELUP) drawLevelUp(1/60);
 }
 
-// Red glow creeping from the edges as core health drops — pure tension.
 function drawDamageVignette() {
-  if (state !== STATE.PLAYING && state !== STATE.PAUSED) return;
-  const hpFrac = coreHealth / CONFIG.coreMaxHealth;
-  if (hpFrac > 0.6) return;                       // only when actually hurt
-  // Pulse faster the closer to death.
-  const danger = 1 - (hpFrac / 0.6);              // 0 at 60% hp -> 1 at 0 hp
+  if (state !== STATE.PLAYING && state !== STATE.PAUSED && state !== STATE.LEVELUP) return;
+  const hpFrac = core.hp / core.maxHp;
+  if (hpFrac > 0.6) return;
+  const danger = 1 - (hpFrac / 0.6);
   const pulse = 0.6 + 0.4 * Math.sin(elapsedReal * (4 + danger * 6));
   const intensity = danger * pulse * 0.55;
   const g = ctx.createRadialGradient(CX, CY, Math.min(W,H)*0.3, CX, CY, Math.max(W,H)*0.7);
   g.addColorStop(0, "rgba(255,61,139,0)");
   g.addColorStop(1, "rgba(255,61,139," + intensity.toFixed(3) + ")");
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
 }
-
-// Brief full-screen color flash (decays via flash.t).
 function drawFlash() {
   if (flash.t <= 0) return;
   const a = (flash.t / flash.max) * (flash.strength || 0.5);
@@ -746,109 +1015,145 @@ function drawFlash() {
 }
 
 function drawBackground() {
-  // Subtle moving grid for retro depth.
   const spacing = 46;
   const off = (gridPhase % spacing);
   ctx.lineWidth = 1;
-  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--grid") || "rgba(56,245,255,0.06)";
+  ctx.strokeStyle = "rgba(56,245,255,0.05)";
   ctx.beginPath();
   for (let x = -off; x < W; x += spacing) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
   for (let y = -off; y < H; y += spacing) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
   ctx.stroke();
 }
 
+// The stasis slow-field, drawn as a soft cyan disc when owned.
+function drawStasisField() {
+  if (player.slow <= 0) return;
+  const r = CONFIG.novaRadius * 0.7;
+  const g = ctx.createRadialGradient(CX, CY, r*0.3, CX, CY, r);
+  g.addColorStop(0, "rgba(56,245,255,0.0)");
+  g.addColorStop(0.8, "rgba(56,245,255,0.05)");
+  g.addColorStop(1, "rgba(56,245,255,0.12)");
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(CX, CY, r, 0, TAU); ctx.fill();
+}
+
 function drawCore() {
-  ctx.save();
-  ctx.translate(CX, CY);
-
-  const pulse = 1 + Math.sin(corePulse * 3) * 0.04;
+  const pulse = 1 + Math.sin(core.pulse * 3) * 0.04;
   const r = CONFIG.coreRadius * pulse;
-  const hpFrac = coreHealth / CONFIG.coreMaxHealth;
-
-  // Core color shifts from cyan (healthy) toward pink (critical).
+  const hpFrac = core.hp / core.maxHp;
   const coreColor = hpFrac > 0.5 ? "#38f5ff" : (hpFrac > 0.25 ? "#ffd23f" : "#ff3d8b");
 
-  // Glow.
-  ctx.shadowBlur = 30 + (coreFlash * 40);
-  ctx.shadowColor = coreFlash > 0 ? "#ffffff" : coreColor;
+  // Outer glow halo.
+  ctx.save();
+  ctx.shadowBlur = 36 + core.flash * 50;
+  ctx.shadowColor = core.flash > 0 ? "#ffffff" : coreColor;
 
-  // Rotating hexagon core.
-  ctx.rotate(corePulse * 0.4);
-  ctx.beginPath();
-  for (let i = 0; i < 6; i++) {
-    const a = (i / 6) * TAU;
-    const px = Math.cos(a) * r, py = Math.sin(a) * r;
-    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  // --- Shaded sphere (pseudo-3D): light from top-left. ---
+  const grad = ctx.createRadialGradient(CX - r*0.4, CY - r*0.45, r*0.1, CX, CY, r*1.05);
+  if (core.flash > 0) {
+    grad.addColorStop(0, "#ffffff"); grad.addColorStop(1, coreColor);
+  } else {
+    grad.addColorStop(0, "#dffaff");
+    grad.addColorStop(0.4, coreColor);
+    grad.addColorStop(1, "#0a1622");
   }
-  ctx.closePath();
-  ctx.fillStyle = coreFlash > 0 ? "rgba(255,255,255,0.9)" : "rgba(10,18,30,0.85)";
-  ctx.fill();
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = coreColor;
-  ctx.stroke();
-
-  // Inner pulsing dot.
-  ctx.rotate(-corePulse * 0.8);
-  ctx.beginPath();
-  ctx.arc(0, 0, r * 0.35, 0, TAU);
-  ctx.fillStyle = coreColor;
-  ctx.fill();
+  ctx.beginPath(); ctx.arc(CX, CY, r, 0, TAU);
+  ctx.fillStyle = grad; ctx.fill();
   ctx.restore();
 
-  // --- Health ring around the core (arc that depletes) ---
+  // Specular highlight.
+  ctx.save();
+  const hl = ctx.createRadialGradient(CX - r*0.42, CY - r*0.45, 0, CX - r*0.42, CY - r*0.45, r*0.55);
+  hl.addColorStop(0, "rgba(255,255,255,0.65)"); hl.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = hl; ctx.beginPath(); ctx.arc(CX, CY, r, 0, TAU); ctx.fill();
+  ctx.restore();
+
+  // Rotating hex "shield" frame orbiting the sphere.
+  ctx.save();
+  ctx.translate(CX, CY);
+  ctx.rotate(core.pulse * 0.4);
+  ctx.shadowBlur = 14; ctx.shadowColor = coreColor;
+  ctx.lineWidth = 2.5; ctx.strokeStyle = coreColor;
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * TAU, R = r + 12;
+    const px = Math.cos(a) * R, py = Math.sin(a) * R;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath(); ctx.stroke();
+  ctx.restore();
+
+  // Health ring.
   ctx.save();
   ctx.translate(CX, CY);
   ctx.shadowBlur = 12; ctx.shadowColor = coreColor;
   ctx.lineWidth = 5; ctx.lineCap = "round";
   ctx.strokeStyle = "rgba(255,255,255,0.08)";
-  ctx.beginPath(); ctx.arc(0, 0, CONFIG.coreRadius + 14, 0, TAU); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, CONFIG.coreRadius + 22, 0, TAU); ctx.stroke();
   ctx.strokeStyle = coreColor;
   ctx.beginPath();
-  ctx.arc(0, 0, CONFIG.coreRadius + 14, -Math.PI/2, -Math.PI/2 + TAU * hpFrac);
+  ctx.arc(0, 0, CONFIG.coreRadius + 22, -Math.PI/2, -Math.PI/2 + TAU * clamp(hpFrac,0,1));
   ctx.stroke();
   ctx.restore();
 }
 
 function drawTurret() {
-  const tx = CX + Math.cos(turret.angle) * CONFIG.orbitRadius;
-  const ty = CY + Math.sin(turret.angle) * CONFIG.orbitRadius;
+  const { x: tx, y: ty } = turretPos();
 
-  // Faint orbit guide ring.
+  // Orbit guide ring.
   ctx.save();
   ctx.strokeStyle = "rgba(56,245,255,0.10)";
   ctx.lineWidth = 1;
   ctx.beginPath(); ctx.arc(CX, CY, CONFIG.orbitRadius, 0, TAU); ctx.stroke();
   ctx.restore();
 
+  // Tether line from core to turret (energy feed).
+  ctx.save();
+  ctx.strokeStyle = "rgba(56,245,255,0.18)"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(CX, CY); ctx.lineTo(tx, ty); ctx.stroke();
+  ctx.restore();
+
   ctx.save();
   ctx.translate(tx, ty);
-  ctx.rotate(turret.angle); // point the nose outward
+  ctx.rotate(player.aimAngle); // point the nose toward target
   const s = CONFIG.turretSize;
+  const accent = player.novaTimer <= 0 ? "#38f5ff" : "#1d6b78";
 
-  ctx.shadowBlur = 18;
-  ctx.shadowColor = buff.rapid > 0 ? "#ffd23f" : "#38f5ff";
+  ctx.shadowBlur = 18; ctx.shadowColor = "#38f5ff";
 
-  // Ship triangle.
+  // Body with a little gradient for depth.
+  const bg = ctx.createLinearGradient(-s, -s, s, s);
+  bg.addColorStop(0, "#0a2a38"); bg.addColorStop(1, "#04141c");
   ctx.beginPath();
   ctx.moveTo(s, 0);
   ctx.lineTo(-s * 0.7,  s * 0.7);
   ctx.lineTo(-s * 0.3, 0);
   ctx.lineTo(-s * 0.7, -s * 0.7);
   ctx.closePath();
-  ctx.fillStyle = "rgba(10,30,40,0.9)";
-  ctx.fill();
-  ctx.lineWidth = 2.5;
-  ctx.strokeStyle = buff.rapid > 0 ? "#ffd23f" : "#38f5ff";
-  ctx.stroke();
+  ctx.fillStyle = bg; ctx.fill();
+  ctx.lineWidth = 2.5; ctx.strokeStyle = accent; ctx.stroke();
 
-  // Engine flame flicker.
+  // Engine flame.
   ctx.beginPath();
   ctx.moveTo(-s * 0.7, 0);
-  ctx.lineTo(-s * (0.7 + Math.random() * 0.5), 0);
-  ctx.strokeStyle = "#ff7b3d";
-  ctx.lineWidth = 3;
-  ctx.stroke();
+  ctx.lineTo(-s * (0.7 + Math.random() * 0.6), 0);
+  ctx.strokeStyle = "#ff7b3d"; ctx.lineWidth = 3; ctx.stroke();
   ctx.restore();
+}
+
+function drawDrones() {
+  for (const dr of drones) {
+    ctx.save();
+    ctx.translate(dr.x, dr.y);
+    ctx.shadowBlur = 12; ctx.shadowColor = "#3dff9e";
+    const r = 9 + Math.sin(dr.pulse * 4) * 1.5;
+    const g = ctx.createRadialGradient(-r*0.3, -r*0.3, 1, 0, 0, r);
+    g.addColorStop(0, "#d6ffe9"); g.addColorStop(1, "#0c3a26");
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = "#3dff9e"; ctx.stroke();
+    ctx.restore();
+  }
 }
 
 function drawEnemies() {
@@ -856,46 +1161,80 @@ function drawEnemies() {
     ctx.save();
     ctx.translate(e.x, e.y);
     ctx.rotate(e.rot);
-    ctx.shadowBlur = 14; ctx.shadowColor = e.color;
-    ctx.fillStyle = e.flash > 0 ? "#ffffff" : "rgba(10,12,24,0.85)";
-    ctx.strokeStyle = e.flash > 0 ? "#ffffff" : e.color;
-    ctx.lineWidth = 2.5;
-    // Corrupted data block = a glitchy square.
+    ctx.shadowBlur = e.boss ? 26 : 14; ctx.shadowColor = e.color;
+
+    // Pseudo-3D shaded block: gradient fill + rim.
+    const s = e.size;
+    if (e.flash > 0) {
+      ctx.fillStyle = "#ffffff"; ctx.strokeStyle = "#ffffff";
+    } else {
+      const g = ctx.createLinearGradient(-s, -s, s, s);
+      g.addColorStop(0, e.color);
+      g.addColorStop(1, "rgba(8,10,20,0.95)");
+      ctx.fillStyle = g; ctx.strokeStyle = e.color;
+    }
+    ctx.lineWidth = e.boss ? 4 : 2.5;
+    ctx.beginPath(); ctx.rect(-s, -s, s*2, s*2); ctx.fill(); ctx.stroke();
     ctx.beginPath();
-    ctx.rect(-e.size, -e.size, e.size * 2, e.size * 2);
-    ctx.fill(); ctx.stroke();
-    // Inner cross detail.
-    ctx.beginPath();
-    ctx.moveTo(-e.size*0.5,0); ctx.lineTo(e.size*0.5,0);
-    ctx.moveTo(0,-e.size*0.5); ctx.lineTo(0,e.size*0.5);
+    ctx.moveTo(-s*0.5,0); ctx.lineTo(s*0.5,0);
+    ctx.moveTo(0,-s*0.5); ctx.lineTo(0,s*0.5);
     ctx.stroke();
+    if (e.slowT > 0) { ctx.strokeStyle = "rgba(150,230,255,0.7)"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(0,0,s*1.3,0,TAU); ctx.stroke(); }
     ctx.restore();
+
+    // Boss HP bar.
+    if (e.boss) {
+      const bw = 80, frac = clamp(e.hp / e.maxHp, 0, 1);
+      ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(e.x - bw/2, e.y - e.size - 16, bw, 6);
+      ctx.fillStyle = "#ff2d6b"; ctx.fillRect(e.x - bw/2, e.y - e.size - 16, bw * frac, 6);
+    }
   }
+}
+
+function drawBeams() {
+  ctx.save();
+  ctx.shadowBlur = 12; ctx.shadowColor = "#38f5ff";
+  for (const bm of beams) {
+    ctx.globalAlpha = clamp(bm.life / bm.maxLife, 0, 1);
+    ctx.strokeStyle = "#cffaff"; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(bm.x1, bm.y1); ctx.lineTo(bm.x2, bm.y2); ctx.stroke();
+  }
+  ctx.globalAlpha = 1; ctx.restore();
 }
 
 function drawBullets() {
   ctx.save();
   ctx.shadowBlur = 10; ctx.shadowColor = "#cffaff";
-  ctx.fillStyle = "#cffaff";
   for (const b of bullets) {
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, CONFIG.bulletRadius, 0, TAU);
-    ctx.fill();
+    ctx.fillStyle = b.crit ? "#ff3d8b" : (b.drone ? "#3dff9e" : "#cffaff");
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
   }
   ctx.restore();
 }
 
-function drawPowerups() {
-  for (const p of powerups) {
+function drawGems() {
+  ctx.save();
+  ctx.shadowBlur = 10; ctx.shadowColor = "#38f5ff";
+  for (const g of gems) {
+    const sc = 1 + Math.sin(g.pulse) * 0.2;
+    ctx.save(); ctx.translate(g.x, g.y); ctx.rotate(g.pulse * 0.5); ctx.scale(sc, sc);
+    ctx.fillStyle = "#38f5ff";
+    ctx.beginPath();
+    ctx.moveTo(0, -5); ctx.lineTo(4, 0); ctx.lineTo(0, 5); ctx.lineTo(-4, 0); ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+function drawShocks() {
+  for (const s of shocks) {
+    const a = clamp(s.life / s.maxLife, 0, 1);
     ctx.save();
-    ctx.translate(p.x, p.y);
-    const sc = 1 + Math.sin(p.pulse) * 0.12;
-    ctx.scale(sc, sc);
-    ctx.shadowBlur = 18; ctx.shadowColor = "#3dff9e";
-    ctx.strokeStyle = "#3dff9e"; ctx.lineWidth = 2.5;
-    ctx.beginPath(); ctx.arc(0, 0, 16, 0, TAU); ctx.stroke();
-    ctx.font = "16px monospace"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText(powerupIcon(p.kind), 0, 1);
+    ctx.globalAlpha = a * 0.8;
+    ctx.strokeStyle = s.color; ctx.lineWidth = 4;
+    ctx.shadowBlur = 18; ctx.shadowColor = s.color;
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, TAU); ctx.stroke();
     ctx.restore();
   }
 }
@@ -914,7 +1253,7 @@ function drawFloaters() {
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
   for (const f of floaters) {
     ctx.globalAlpha = clamp(f.life / 0.9, 0, 1);
-    ctx.font = "bold 18px monospace";
+    ctx.font = "bold " + (f.size || 18) + "px monospace";
     ctx.fillStyle = f.color;
     ctx.shadowBlur = 8; ctx.shadowColor = f.color;
     ctx.fillText(f.text, f.x, f.y);
@@ -924,181 +1263,279 @@ function drawFloaters() {
 
 
 /* =================================================================
-   11. HUD + SCREENS
+   14. HUD + SCREENS  (glossy beveled panels)
    ================================================================= */
-function drawHUD() {
+// Reusable glossy 3D-ish panel.
+function panel(x, y, w, h, accent = "#38f5ff", alpha = 0.9) {
   ctx.save();
+  ctx.shadowBlur = 24; ctx.shadowColor = "rgba(0,0,0,0.6)";
+  roundRectPath(x, y, w, h, 12);
+  const g = ctx.createLinearGradient(x, y, x, y + h);
+  g.addColorStop(0, "rgba(20,30,52," + alpha + ")");
+  g.addColorStop(1, "rgba(6,10,22," + alpha + ")");
+  ctx.fillStyle = g; ctx.fill();
   ctx.shadowBlur = 0;
-  ctx.textBaseline = "top";
+  // Top highlight + accent border.
+  ctx.lineWidth = 1.5; ctx.strokeStyle = accent;
+  roundRectPath(x + 0.5, y + 0.5, w - 1, h - 1, 12); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+  ctx.beginPath(); ctx.moveTo(x + 12, y + 2); ctx.lineTo(x + w - 12, y + 2); ctx.stroke();
+  ctx.restore();
+}
+
+function drawHUD() {
+  if (state === STATE.MENU) return;
+  ctx.save();
+  ctx.shadowBlur = 0; ctx.textBaseline = "top";
 
   // Score (top-left)
   ctx.textAlign = "left";
-  ctx.font = "bold 30px monospace";
-  ctx.fillStyle = "#38f5ff";
+  ctx.font = "bold 30px monospace"; ctx.fillStyle = "#38f5ff";
   ctx.fillText("SCORE " + (score|0), 24, 22);
-
-  ctx.font = "14px monospace";
-  ctx.fillStyle = "rgba(255,255,255,0.5)";
+  ctx.font = "14px monospace"; ctx.fillStyle = "rgba(255,255,255,0.5)";
   ctx.fillText("HI " + highScore, 24, 56);
 
+  // Level + XP bar (top-center, beneath any combo)
+  const xbw = 240, xbh = 10, xbx = CX - xbw/2, xby = 74;
+  ctx.fillStyle = "rgba(255,255,255,0.12)"; ctx.fillRect(xbx, xby, xbw, xbh);
+  ctx.fillStyle = "#3dff9e"; ctx.fillRect(xbx, xby, xbw * clamp(xp / xpNext, 0, 1), xbh);
+  ctx.strokeStyle = "rgba(61,255,158,0.5)"; ctx.lineWidth = 1; ctx.strokeRect(xbx, xby, xbw, xbh);
+  ctx.textAlign = "center"; ctx.font = "bold 14px monospace"; ctx.fillStyle = "#3dff9e";
+  ctx.fillText("LV " + level, CX, xby + 14);
+
   // Wave (top-right)
-  ctx.textAlign = "right";
-  ctx.font = "bold 20px monospace";
-  ctx.fillStyle = "#ffd23f";
+  ctx.textAlign = "right"; ctx.font = "bold 20px monospace"; ctx.fillStyle = "#ffd23f";
   ctx.fillText("WAVE " + wave, W - 24, 24);
 
-  // Combo meter (top-center, only when active)
+  // Combo (top-center)
   if (combo > 1 && state === STATE.PLAYING) {
-    ctx.textAlign = "center";
-    ctx.font = "bold 26px monospace";
-    ctx.fillStyle = "#ffd23f";
+    ctx.textAlign = "center"; ctx.font = "bold 26px monospace"; ctx.fillStyle = "#ffd23f";
     ctx.shadowBlur = 12; ctx.shadowColor = "#ffd23f";
     ctx.fillText("COMBO x" + combo, CX, 22);
-    // Combo timer bar.
-    const w = 160, frac = clamp(comboTimer / CONFIG.comboWindow, 0, 1);
     ctx.shadowBlur = 0;
-    ctx.fillStyle = "rgba(255,255,255,0.15)";
-    ctx.fillRect(CX - w/2, 54, w, 5);
-    ctx.fillStyle = "#ffd23f";
-    ctx.fillRect(CX - w/2, 54, w * frac, 5);
+    const w = 160, frac = clamp(comboTimer / 1.6, 0, 1);
+    ctx.fillStyle = "rgba(255,255,255,0.15)"; ctx.fillRect(CX - w/2, 52, w, 4);
+    ctx.fillStyle = "#ffd23f"; ctx.fillRect(CX - w/2, 52, w * frac, 4);
   }
 
-  // Active buffs (bottom-left chips)
+  // Wave banner.
+  if (waveBannerTimer > 0 && !floatBanner) {
+    const a = clamp(waveBannerTimer / 1.6, 0, 1);
+    ctx.globalAlpha = a; ctx.textAlign = "center";
+    ctx.font = "bold 40px monospace"; ctx.fillStyle = "#ffd23f";
+    ctx.shadowBlur = 18; ctx.shadowColor = "#ffd23f";
+    ctx.fillText("WAVE " + wave, CX, CY - 160);
+    ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+  }
+
+  // --- Nova cooldown chip (bottom-center) ---
+  const ncw = 200, nch = 22, ncx = CX - ncw/2, ncy = H - 44;
+  const ready = player.novaTimer <= 0;
+  ctx.fillStyle = "rgba(255,255,255,0.1)"; ctx.fillRect(ncx, ncy, ncw, nch);
+  const frac = 1 - clamp(player.novaTimer / CONFIG.novaCooldown, 0, 1);
+  ctx.fillStyle = ready ? "rgba(56,245,255,0.5)" : "rgba(56,245,255,0.25)";
+  ctx.fillRect(ncx, ncy, ncw * frac, nch);
+  ctx.strokeStyle = "rgba(56,245,255,0.5)"; ctx.lineWidth = 1; ctx.strokeRect(ncx, ncy, ncw, nch);
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = "bold 13px monospace"; ctx.fillStyle = ready ? "#cffaff" : "rgba(255,255,255,0.6)";
+  ctx.fillText(ready ? "⚡ PULSE NOVA  [SPACE]" : "CHARGING…", CX, ncy + nch/2);
+  ctx.textBaseline = "top";
+
+  // --- Owned upgrades (bottom-left chips) ---
   let bx = 24, by = H - 40;
-  if (buff.rapid > 0)     { drawBuffChip(bx, by, "⚡ RAPID " + buff.rapid.toFixed(0)); bx += 150; }
-  if (buff.multishot > 0) { drawBuffChip(bx, by, "🔱 TRI " + buff.multishot.toFixed(0)); }
+  const owned = UPGRADES.filter(u => upgLevels[u.id]);
+  for (const u of owned) {
+    const label = u.icon + " " + (upgLevels[u.id]);
+    ctx.font = "13px monospace";
+    const cw = ctx.measureText(label).width + 14;
+    ctx.fillStyle = "rgba(255,255,255,0.08)"; ctx.fillRect(bx, by, cw, 22);
+    ctx.fillStyle = u.color; ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.fillText(label, bx + 6, by + 5);
+    bx += cw + 6;
+    if (bx > W - 120) break;
+  }
 
   // Sound state (bottom-right)
-  ctx.textAlign = "right"; ctx.textBaseline = "top";
-  ctx.font = "13px monospace";
-  ctx.fillStyle = "rgba(255,255,255,0.4)";
+  ctx.textAlign = "right"; ctx.font = "13px monospace"; ctx.fillStyle = "rgba(255,255,255,0.4)";
   ctx.fillText((muted ? "🔇 MUTED" : "🔊 SOUND") + "  [M]", W - 24, H - 34);
 
   ctx.restore();
 }
-function drawBuffChip(x, y, label) {
-  ctx.font = "14px monospace"; ctx.textAlign = "left"; ctx.textBaseline = "top";
-  ctx.fillStyle = "rgba(255,210,63,0.15)";
-  ctx.fillRect(x, y, ctx.measureText(label).width + 16, 24);
-  ctx.fillStyle = "#ffd23f";
-  ctx.fillText(label, x + 8, y + 5);
-}
 
-// Reusable centered title/subtitle overlay panel.
-function overlayPanel() {
-  ctx.fillStyle = "rgba(5,6,12,0.7)";
-  ctx.fillRect(0, 0, W, H);
+function drawBigBanner() {
+  const a = clamp(floatBanner.t / 2.2, 0, 1);
+  ctx.save();
+  ctx.textAlign = "center"; ctx.globalAlpha = Math.min(1, a * 2);
+  ctx.font = "bold 44px monospace"; ctx.fillStyle = floatBanner.color;
+  ctx.shadowBlur = 22; ctx.shadowColor = floatBanner.color;
+  ctx.fillText(floatBanner.text, CX, CY - 180 + (1 - a) * -20);
+  ctx.restore();
 }
 
 function drawMenu() {
-  overlayPanel();
-  ctx.textAlign = "center"; ctx.shadowBlur = 0;
+  ctx.fillStyle = "rgba(4,5,11,0.7)"; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center"; ctx.shadowBlur = 0; ctx.textBaseline = "alphabetic";
 
-  ctx.font = "bold 64px monospace";
-  ctx.fillStyle = "#38f5ff";
-  ctx.shadowBlur = 24; ctx.shadowColor = "#38f5ff";
-  ctx.fillText("CORE DEFENDER", CX, CY - 120);
+  ctx.font = "bold 66px monospace"; ctx.fillStyle = "#38f5ff";
+  ctx.shadowBlur = 26; ctx.shadowColor = "#38f5ff";
+  ctx.fillText("CORE DEFENDER", CX, CY - 150);
+  ctx.shadowBlur = 8; ctx.font = "bold 22px monospace"; ctx.fillStyle = "#ffd23f";
+  ctx.fillText("// OVERCLOCK", CX, CY - 116);
   ctx.shadowBlur = 0;
 
-  ctx.font = "18px monospace";
-  ctx.fillStyle = "rgba(255,255,255,0.8)";
-  ctx.fillText("Defend the CPU core from corrupted data blocks.", CX, CY - 56);
+  ctx.font = "17px monospace"; ctx.fillStyle = "rgba(255,255,255,0.85)";
+  ctx.fillText("Your turret AUTO-FIRES. Rotate to cover the swarm,", CX, CY - 64);
+  ctx.fillText("vacuum XP, level up, and build an overpowered grid.", CX, CY - 40);
 
-  ctx.font = "16px monospace";
+  ctx.font = "15px monospace"; ctx.fillStyle = "#3dff9e";
+  ctx.fillText("A / D  or  ◄ ►  —  orbit     •     MOUSE  —  swing to a side", CX, CY + 6);
   ctx.fillStyle = "#ffd23f";
-  ctx.fillText("A / D  or  ◄ ►  —  rotate turret", CX, CY - 6);
-  ctx.fillText("MOUSE  —  aim    •    SPACE / CLICK  —  fire", CX, CY + 22);
+  ctx.fillText("SPACE / CLICK  —  PULSE NOVA     •     1 / 2 / 3  —  pick upgrade", CX, CY + 32);
 
-  // Blinking start prompt.
   if (Math.floor(elapsedReal * 2) % 2 === 0) {
-    ctx.font = "bold 24px monospace";
-    ctx.fillStyle = "#38f5ff";
-    ctx.fillText("▶  CLICK or PRESS SPACE to START", CX, CY + 86);
+    ctx.font = "bold 24px monospace"; ctx.fillStyle = "#38f5ff";
+    ctx.fillText("▶  CLICK or PRESS SPACE to START", CX, CY + 92);
   }
-
-  ctx.font = "14px monospace";
-  ctx.fillStyle = "rgba(255,255,255,0.4)";
+  ctx.font = "14px monospace"; ctx.fillStyle = "rgba(255,255,255,0.4)";
   ctx.fillText("HIGH SCORE  " + highScore + "    •    P pause    •    M mute", CX, CY + 140);
 }
 
-function drawDeath() {
-  overlayPanel();
-  ctx.textAlign = "center"; ctx.shadowBlur = 0;
+function drawLevelUp() {
+  ctx.fillStyle = "rgba(4,5,11,0.78)"; ctx.fillRect(0, 0, W, H);
+  cardAnim = Math.min(1, cardAnim + 0.08);
+  const ease = 1 - Math.pow(1 - cardAnim, 3);
 
-  ctx.font = "bold 56px monospace";
-  ctx.fillStyle = "#ff3d8b";
+  ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+  ctx.font = "bold 40px monospace"; ctx.fillStyle = "#3dff9e";
+  ctx.shadowBlur = 20; ctx.shadowColor = "#3dff9e";
+  ctx.fillText("LEVEL UP!", CX, CY - 200);
+  ctx.shadowBlur = 0;
+  ctx.font = "16px monospace"; ctx.fillStyle = "rgba(255,255,255,0.7)";
+  ctx.fillText("Choose an upgrade  —  click or press 1 / 2 / 3", CX, CY - 168);
+
+  const rects = cardRects();
+  for (const r of rects) {
+    const u = r.u;
+    const lvl = (upgLevels[u.id] || 0);
+    const hover = mouse.x >= r.x && mouse.x <= r.x + r.w && mouse.y >= r.y && mouse.y <= r.y + r.h;
+    // Entrance slide.
+    const oy = (1 - ease) * (40 + r.i * 14);
+    const x = r.x, y = r.y + oy;
+
+    // Card panel (glossy, lifts on hover for a 3D feel).
+    ctx.save();
+    if (hover) { ctx.translate(0, -8); }
+    panel(x, y, r.w, r.h, u.color, 0.95);
+
+    // Big icon disc.
+    ctx.textAlign = "center";
+    const ix = x + r.w/2, iy = y + 76;
+    const gd = ctx.createRadialGradient(ix - 10, iy - 12, 4, ix, iy, 40);
+    gd.addColorStop(0, "rgba(255,255,255,0.25)"); gd.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = gd; ctx.beginPath(); ctx.arc(ix, iy, 40, 0, TAU); ctx.fill();
+    ctx.font = "44px monospace"; ctx.textBaseline = "middle";
+    ctx.fillText(u.icon, ix, iy + 2);
+
+    // Name.
+    ctx.textBaseline = "alphabetic";
+    ctx.font = "bold 19px monospace"; ctx.fillStyle = u.color;
+    ctx.shadowBlur = 8; ctx.shadowColor = u.color;
+    ctx.fillText(u.name, ix, y + 150);
+    ctx.shadowBlur = 0;
+
+    // Level pips.
+    ctx.font = "13px monospace"; ctx.fillStyle = "rgba(255,255,255,0.55)";
+    const nextLvl = lvl + 1;
+    ctx.fillText(lvl > 0 ? ("LV " + lvl + " → " + nextLvl) : "NEW  →  LV 1", ix, y + 176);
+
+    // Description (wrap-ish single line).
+    ctx.font = "15px monospace"; ctx.fillStyle = "rgba(255,255,255,0.85)";
+    wrapText(u.desc(), ix, y + 214, r.w - 36, 20);
+
+    // Pick key hint.
+    ctx.font = "bold 16px monospace"; ctx.fillStyle = hover ? "#ffffff" : u.color;
+    ctx.fillText("[ " + (r.i + 1) + " ]", ix, y + r.h - 24);
+    ctx.restore();
+  }
+}
+
+// Naive word-wrap centered around x.
+function wrapText(text, x, y, maxW, lh) {
+  const words = text.split(" ");
+  let line = "", lines = [];
+  for (const w of words) {
+    const test = line ? line + " " + w : w;
+    if (ctx.measureText(test).width > maxW && line) { lines.push(line); line = w; }
+    else line = test;
+  }
+  if (line) lines.push(line);
+  for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], x, y + i * lh);
+}
+
+function drawDeath() {
+  ctx.fillStyle = "rgba(4,5,11,0.72)"; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center"; ctx.shadowBlur = 0; ctx.textBaseline = "alphabetic";
+
+  ctx.font = "bold 56px monospace"; ctx.fillStyle = "#ff3d8b";
   ctx.shadowBlur = 24; ctx.shadowColor = "#ff3d8b";
-  ctx.fillText("CORE BREACHED", CX, CY - 168);
+  ctx.fillText("CORE BREACHED", CX, CY - 180);
   ctx.shadowBlur = 0;
 
-  ctx.font = "bold 38px monospace";
-  ctx.fillStyle = "#ffffff";
-  ctx.fillText("SCORE  " + (score|0), CX, CY - 96);
+  ctx.font = "bold 38px monospace"; ctx.fillStyle = "#ffffff";
+  ctx.fillText("SCORE  " + (score|0), CX, CY - 116);
 
   const isNew = score >= highScore && score > 0;
-  ctx.font = "18px monospace";
-  ctx.fillStyle = isNew ? "#ffd23f" : "rgba(255,255,255,0.6)";
-  ctx.fillText(isNew ? "★ NEW HIGH SCORE ★" : "HIGH SCORE  " + highScore, CX, CY - 56);
+  ctx.font = "18px monospace"; ctx.fillStyle = isNew ? "#ffd23f" : "rgba(255,255,255,0.6)";
+  ctx.fillText(isNew ? "★ NEW HIGH SCORE ★" : "HIGH SCORE  " + highScore, CX, CY - 80);
 
-  // --- RUN STATS PANEL ---
   const acc = stats.shotsFired ? Math.round((stats.shotsHit / stats.shotsFired) * 100) : 0;
-  const mins = Math.floor(stats.runTime / 60);
-  const secs = Math.floor(stats.runTime % 60);
+  const mins = Math.floor(stats.runTime / 60), secs = Math.floor(stats.runTime % 60);
   const timeStr = mins + ":" + String(secs).padStart(2, "0");
   const rows = [
     ["TIME SURVIVED", timeStr],
+    ["LEVEL REACHED", String(level)],
     ["WAVES CLEARED", String(wave)],
     ["BLOCKS DESTROYED", String(stats.kills)],
+    ["BOSSES KILLED", String(stats.bosses)],
     ["BEST COMBO", "x" + stats.maxCombo],
     ["ACCURACY", acc + "%"],
   ];
-  const pw = 360, ph = rows.length * 30 + 24, px = CX - pw/2, py = CY - 28;
-  ctx.fillStyle = "rgba(56,245,255,0.05)";
-  ctx.fillRect(px, py, pw, ph);
-  ctx.strokeStyle = "rgba(56,245,255,0.25)"; ctx.lineWidth = 1;
-  ctx.strokeRect(px, py, pw, ph);
-  ctx.font = "16px monospace"; ctx.textBaseline = "middle";
+  const pw = 380, ph = rows.length * 28 + 24, px = CX - pw/2, py = CY - 48;
+  panel(px, py, pw, ph, "#38f5ff", 0.85);
+  ctx.font = "15px monospace"; ctx.textBaseline = "middle";
   for (let i = 0; i < rows.length; i++) {
-    const ry = py + 24 + i * 30;
-    ctx.textAlign = "left";
-    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    const ry = py + 22 + i * 28;
+    ctx.textAlign = "left"; ctx.fillStyle = "rgba(255,255,255,0.55)";
     ctx.fillText(rows[i][0], px + 20, ry);
-    ctx.textAlign = "right";
-    ctx.fillStyle = "#38f5ff";
+    ctx.textAlign = "right"; ctx.fillStyle = "#38f5ff";
     ctx.fillText(rows[i][1], px + pw - 20, ry);
   }
-  ctx.textBaseline = "top";
+  ctx.textBaseline = "alphabetic";
 
   if (Math.floor(elapsedReal * 2) % 2 === 0) {
-    ctx.textAlign = "center";
-    ctx.font = "bold 22px monospace";
-    ctx.fillStyle = "#38f5ff";
-    ctx.fillText("▶  PRESS  R  or  CLICK  to RETRY", CX, py + ph + 28);
+    ctx.textAlign = "center"; ctx.font = "bold 22px monospace"; ctx.fillStyle = "#38f5ff";
+    ctx.fillText("▶  PRESS  R  or  CLICK  to RETRY", CX, py + ph + 40);
   }
 }
 
 function drawPaused() {
-  overlayPanel();
-  ctx.textAlign = "center";
-  ctx.font = "bold 48px monospace";
-  ctx.fillStyle = "#38f5ff";
-  ctx.fillText("PAUSED", CX, CY - 20);
-  ctx.font = "18px monospace";
-  ctx.fillStyle = "rgba(255,255,255,0.6)";
-  ctx.fillText("press P to resume", CX, CY + 30);
+  ctx.fillStyle = "rgba(4,5,11,0.7)"; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+  ctx.font = "bold 48px monospace"; ctx.fillStyle = "#38f5ff";
+  ctx.fillText("PAUSED", CX, CY - 10);
+  ctx.font = "18px monospace"; ctx.fillStyle = "rgba(255,255,255,0.6)";
+  ctx.fillText("press P to resume", CX, CY + 36);
 }
 
 
 /* =================================================================
-   12. MAIN LOOP  (delta-timed for consistent speed on any monitor)
+   15. MAIN LOOP  (delta-timed for consistent speed on any monitor)
    ================================================================= */
 let lastTime = performance.now();
-let elapsedReal = 0; // wall-clock time, used for blinking UI
 
 function loop(now) {
   let dt = (now - lastTime) / 1000;
   lastTime = now;
-  // Clamp dt so a background tab / hitch doesn't teleport everything.
   dt = Math.min(dt, 0.05);
   elapsedReal += dt;
 
