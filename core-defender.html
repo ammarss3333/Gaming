@@ -5,15 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>CORE DEFENDER // OVERCLOCK 3D</title>
 
-<!-- Three.js (true 3D / WebGL) loaded as ES modules from a CDN. -->
-<script type="importmap">
-{
-  "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-  }
-}
-</script>
+<!-- Three.js (true 3D / WebGL) — vendored LOCALLY so the game runs fully
+     offline with no CDN. Classic scripts load fine from file:// (unlike ES
+     modules), so you can just double-click this .html file to play. -->
 
 <style>
   /* ============================================================
@@ -199,11 +193,13 @@
     <div class="lead">press P to resume</div>
   </div>
 
-<script type="module">
-import * as THREE from 'three';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+<!-- Local Three.js core (global build) + bundled post-processing passes. -->
+<script src="lib/three/three.min.js"></script>
+<script src="lib/three/three-postprocessing.js"></script>
+<script>
+// THREE is now a global (from three.min.js); the passes are attached to it
+// by three-postprocessing.js. Pull them into locals to match the rest of the code.
+const { EffectComposer, RenderPass, UnrealBloomPass } = THREE;
 
 /* ================================================================
    CORE DEFENDER // OVERCLOCK 3D
