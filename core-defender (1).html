@@ -1,0 +1,1113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>CORE DEFENDER // ICE_BREAKER</title>
+<style>
+  /* ============================================================
+     PRESENTATION LAYER (pure CSS — no external assets)
+     A retro-CRT arcade frame: scanlines, vignette, neon glow.
+     ============================================================ */
+  :root {
+    --bg:        #05060c;   /* deep space background        */
+    --neon-cyan: #38f5ff;   /* player / friendly accent     */
+    --neon-pink: #ff3d8b;   /* danger / enemy accent        */
+    --neon-amber:#ffd23f;   /* score / power accent         */
+    --grid:      rgba(56,245,255,0.06);
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  html, body {
+    width:100%; height:100%; overflow:hidden;
+    background:var(--bg);
+    font-family: "Courier New", monospace;
+    /* Disable text selection / callouts so dragging feels game-like */
+    user-select:none; -webkit-user-select:none; -webkit-touch-callout:none;
+    cursor: crosshair;
+  }
+
+  /* The canvas fills the screen; it's the actual game surface. */
+  #game {
+    display:block;
+    width:100%; height:100%;
+    background: radial-gradient(circle at 50% 50%, #0a0e1f 0%, #05060c 70%, #020308 100%);
+  }
+
+  /* CRT scanline + vignette overlay sits ON TOP of the canvas but
+     ignores pointer events so clicks still reach the game. */
+  #crt {
+    position:fixed; inset:0; pointer-events:none; z-index:10;
+    background:
+      repeating-linear-gradient(
+        to bottom,
+        rgba(0,0,0,0)    0px,
+        rgba(0,0,0,0)    2px,
+        rgba(0,0,0,0.18) 3px,
+        rgba(0,0,0,0.18) 4px
+      );
+    mix-blend-mode: multiply;
+    animation: flicker 6s infinite;
+  }
+  #crt::after {
+    content:""; position:absolute; inset:0;
+    background: radial-gradient(circle at 50% 50%, transparent 55%, rgba(0,0,0,0.55) 100%);
+  }
+  @keyframes flicker {
+    0%,100%{opacity:0.9} 48%{opacity:0.9} 50%{opacity:0.75} 52%{opacity:0.9}
+  }
+</style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="crt"></div>
+
+<script>
+"use strict";
+/* ================================================================
+   CORE DEFENDER
+   A central CPU core is under siege. You command an orbiting
+   defense turret. Rotate around the core, blast the corrupted data
+   blocks before they breach the core. Survive escalating waves.
+
+   ── CONTROLS ───────────────────────────────────────────────────
+   • A / D   or  ◄ / ►   →  Rotate turret around the core
+   • Move MOUSE           →  Aim turret toward cursor (auto-orbit)
+   • SPACE or HOLD CLICK   →  Fire
+   • R                    →  Restart after death
+   • P                    →  Pause
+
+   Everything below is heavily commented. The CONFIG block is the
+   first thing you'll want to tweak.
+   ================================================================ */
+
+
+/* =================================================================
+   1. CONFIG  —  TWEAK THESE TO CHANGE THE GAME FEEL
+   ================================================================= */
+const CONFIG = {
+  // --- Core (the thing you protect) ---
+  coreRadius:        46,    // visual + collision radius of the core
+  coreMaxHealth:     100,   // starting core HP
+  coreDamagePerHit:  12,    // HP lost when a basic enemy breaches
+
+  // --- Player turret ---
+  orbitRadius:       118,   // distance the turret sits from core center
+  turretSize:        18,    // turret triangle size
+  rotateSpeed:       4.2,   // radians/sec when using keyboard
+  mouseAimLerp:      14,    // how snappily the turret follows the mouse
+  fireRate:          0.13,  // seconds between shots (lower = faster)
+  bulletSpeed:       720,   // px/sec
+  bulletLife:        1.4,   // seconds before a bullet despawns
+  bulletRadius:      4,
+
+  // --- Enemies ---
+  baseEnemySpeed:    55,    // px/sec at the very start
+  baseSpawnInterval: 1.5,   // seconds between spawns at the start
+  minSpawnInterval:  0.32,  // hardest possible spawn rate
+  difficultyRamp:    55,    // higher = slower difficulty climb
+
+  // --- Scoring / combo ---
+  comboWindow:       1.6,   // seconds you have to chain a kill
+  maxCombo:          9,     // combo multiplier cap
+
+  // --- Juice ---
+  shakeOnHit:        0.55,  // screen trauma when core is breached (0-1)
+  shakeOnKill:       0.08,  // tiny shake on every kill
+  particlesPerKill:  16,
+  particlesPerBreach:34,
+
+  // --- Power-ups ---
+  powerupChance:     0.085, // chance an enemy drops nothing-vs-powerup spawn tick
+  powerupInterval:   9,     // min seconds between power-up spawns
+};
+
+// Enemy archetypes. Add your own here — the spawner reads this table.
+// unlockScore = score at which this type starts appearing.
+const ENEMY_TYPES = {
+  grunt:    { hp:1, size:13, speedMul:1.0,  color:"#ff3d8b", value:10, unlockScore:0 },
+  fast:     { hp:1, size:10, speedMul:1.9,  color:"#ff7b3d", value:15, unlockScore:300 },
+  tank:     { hp:4, size:22, speedMul:0.55, color:"#b14dff", value:35, unlockScore:800 },
+  zigzag:   { hp:2, size:13, speedMul:1.1,  color:"#ffd23f", value:25, unlockScore:1500, wiggle:true },
+  splitter: { hp:2, size:18, speedMul:0.8,  color:"#3dff9e", value:30, unlockScore:2600, splits:true },
+};
+
+// Power-up archetypes.
+const POWERUP_TYPES = ["rapid", "bomb", "heal", "multishot"];
+
+
+/* =================================================================
+   2. CANVAS SETUP  (handles high-DPI screens for crisp neon)
+   ================================================================= */
+const canvas = document.getElementById("game");
+const ctx    = canvas.getContext("2d");
+let W = 0, H = 0, CX = 0, CY = 0, DPR = 1;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2); // cap DPR for perf
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width  = Math.floor(W * DPR);
+  canvas.height = Math.floor(H * DPR);
+  canvas.style.width  = W + "px";
+  canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0); // map drawing units to CSS px
+  CX = W / 2;
+  CY = H / 2;
+}
+window.addEventListener("resize", resize);
+resize();
+
+
+/* =================================================================
+   3. GAME STATE
+   ================================================================= */
+const STATE = { MENU:0, PLAYING:1, DEAD:2, PAUSED:3 };
+let state = STATE.MENU;
+
+// NOTE: these are given starting values right here (not only inside
+// startGame) because render() runs during the MENU screen too, and it
+// iterates these arrays. Leaving them undefined crashes the first frame.
+let score = 0, combo = 0, comboTimer = 0, wave = 1, waveBannerTimer = 0;
+let coreHealth = CONFIG.coreMaxHealth, coreFlash = 0, corePulse = 0;
+let highScore = parseInt(localStorage.getItem("coreDefenderHi") || "0", 10);
+
+let enemies = [], bullets = [], particles = [], powerups = [], floaters = [];
+let spawnTimer = 0, fireTimer = 0, elapsed = 0, powerupTimer = 0;
+
+// Player turret
+const turret = { angle:-Math.PI/2, desiredAngle:-Math.PI/2 };
+
+// Active player buffs (timers in seconds; 0 = inactive)
+let buff = { rapid:0, multishot:0 };
+
+// Screen-shake "trauma" — decays every frame; shake = trauma^2.
+let trauma = 0;
+
+// --- "FEEL" STATE (added in the juice pass) ---
+let freezeTimer = 0;          // hit-stop: while > 0, gameplay sim is paused
+let flash = { t:0, max:0.18, color:"255,255,255" }; // full-screen flash on impact
+let muted = false;            // M toggles all sound
+
+// Per-run stats, shown on the death screen so players chase their best run.
+let stats = { kills:0, shotsFired:0, shotsHit:0, maxCombo:0, runTime:0 };
+
+// Background grid scroll offset (for subtle parallax life)
+let gridPhase = 0;
+
+// Input
+const keys = {};
+const mouse = { x: CX, y: CY, down:false, active:false };
+let controlMode = "key"; // "key" or "mouse" — whichever was used last
+
+
+/* =================================================================
+   4. INPUT HANDLING
+   ================================================================= */
+window.addEventListener("keydown", (e) => {
+  keys[e.code] = true;
+  if (["ArrowLeft","ArrowRight","KeyA","KeyD"].includes(e.code)) controlMode = "key";
+
+  if (e.code === "Space") { e.preventDefault(); if (state === STATE.MENU) startGame(); }
+  if (e.code === "KeyR" && state === STATE.DEAD) startGame();
+  if (e.code === "KeyP") {
+    if (state === STATE.PLAYING) state = STATE.PAUSED;
+    else if (state === STATE.PAUSED) state = STATE.PLAYING;
+  }
+  if (e.code === "KeyM") muted = !muted;   // toggle all sound
+});
+window.addEventListener("keyup", (e) => { keys[e.code] = false; });
+
+canvas.addEventListener("mousemove", (e) => {
+  const r = canvas.getBoundingClientRect();
+  mouse.x = e.clientX - r.left;
+  mouse.y = e.clientY - r.top;
+  mouse.active = true;
+  controlMode = "mouse";
+});
+canvas.addEventListener("mousedown", () => {
+  mouse.down = true;
+  if (state === STATE.MENU)  startGame();
+  if (state === STATE.DEAD)  startGame();
+});
+window.addEventListener("mouseup", () => { mouse.down = false; });
+
+// Touch support (mobile-friendly): drag to aim, hold to fire.
+canvas.addEventListener("touchstart", (e) => {
+  e.preventDefault();
+  const t = e.touches[0], r = canvas.getBoundingClientRect();
+  mouse.x = t.clientX - r.left; mouse.y = t.clientY - r.top;
+  mouse.down = true; controlMode = "mouse";
+  if (state === STATE.MENU || state === STATE.DEAD) startGame();
+}, { passive:false });
+canvas.addEventListener("touchmove", (e) => {
+  e.preventDefault();
+  const t = e.touches[0], r = canvas.getBoundingClientRect();
+  mouse.x = t.clientX - r.left; mouse.y = t.clientY - r.top; controlMode = "mouse";
+}, { passive:false });
+canvas.addEventListener("touchend", (e) => { e.preventDefault(); mouse.down = false; }, { passive:false });
+
+
+/* =================================================================
+   4b. PROCEDURAL SOUND ENGINE  (no audio files — all synthesized)
+   -----------------------------------------------------------------
+   The Web Audio API lets us generate every sound effect on the fly
+   from oscillators + noise, so the game stays a single self-contained
+   file. The AudioContext must be created/resumed after a user gesture
+   (browser autoplay policy), so we lazily init on first input.
+   ================================================================= */
+let actx = null;       // the AudioContext (created on first interaction)
+let masterGain = null; // global volume + mute bus
+
+function initAudio() {
+  if (actx) { if (actx.state === "suspended") actx.resume(); return; }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  actx = new AC();
+  masterGain = actx.createGain();
+  masterGain.gain.value = 0.5;          // overall volume (tweak 0..1)
+  masterGain.connect(actx.destination);
+}
+// Any gesture wakes the audio engine.
+window.addEventListener("mousedown", initAudio);
+window.addEventListener("keydown", initAudio);
+window.addEventListener("touchstart", initAudio);
+
+// Play a quick tone. type: oscillator wave; freq sweeps from f0 -> f1.
+function tone(f0, f1, dur, type = "square", vol = 0.3) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const osc = actx.createOscillator();
+  const g   = actx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(f0, t);
+  osc.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur); // fast decay
+  osc.connect(g); g.connect(masterGain);
+  osc.start(t); osc.stop(t + dur);
+}
+
+// Filtered noise burst — used for explosions / impacts.
+function noise(dur, cutoff = 1200, vol = 0.4) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const n = Math.floor(actx.sampleRate * dur);
+  const buf = actx.createBuffer(1, n, actx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n); // decaying
+  const src = actx.createBufferSource(); src.buffer = buf;
+  const lp = actx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = cutoff;
+  const g  = actx.createGain(); g.gain.value = vol;
+  src.connect(lp); lp.connect(g); g.connect(masterGain);
+  src.start(t);
+}
+
+// Named SFX — call these from gameplay code.
+const SFX = {
+  shoot:   () => tone(880, 420, 0.07, "square", 0.12),
+  hit:     () => tone(300, 200, 0.05, "square", 0.10),
+  kill:    () => { tone(180, 90, 0.18, "sawtooth", 0.18); noise(0.18, 1800, 0.18); },
+  breach:  () => { tone(120, 40, 0.45, "sine", 0.5); noise(0.5, 500, 0.5); },
+  powerup: () => { tone(520, 1040, 0.18, "triangle", 0.25); tone(780, 1560, 0.22, "triangle", 0.15); },
+  gameover:() => { tone(220, 30, 1.1, "sawtooth", 0.4); noise(1.1, 700, 0.4); },
+};
+
+
+/* =================================================================
+   5. UTILITY HELPERS
+   ================================================================= */
+const rand  = (a, b) => a + Math.random() * (b - a);
+const randi = (a, b) => Math.floor(rand(a, b + 1));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const TAU   = Math.PI * 2;
+
+// Shortest-path interpolation between two angles (handles wrap-around).
+function lerpAngle(from, to, t) {
+  let diff = ((to - from + Math.PI) % TAU) - Math.PI;
+  if (diff < -Math.PI) diff += TAU;
+  return from + diff * t;
+}
+
+function addShake(amount) { trauma = clamp(trauma + amount, 0, 1); }
+
+// Hit-stop: briefly freeze the gameplay sim so impacts read as weighty.
+function hitStop(seconds) { freezeTimer = Math.max(freezeTimer, seconds); }
+
+// Trigger a full-screen color flash that decays over its duration.
+function screenFlash(color, dur = 0.18, strength = 0.5) {
+  flash.color = color; flash.max = dur; flash.t = dur; flash.strength = strength;
+}
+
+
+/* =================================================================
+   6. SPAWNERS / FACTORIES
+   ================================================================= */
+// Pick a random enemy type that's currently unlocked by score.
+function pickEnemyType() {
+  const pool = Object.keys(ENEMY_TYPES).filter(k => score >= ENEMY_TYPES[k].unlockScore);
+  // Weight toward harder types as score rises, but keep grunts common.
+  return pool[randi(0, pool.length - 1)];
+}
+
+function spawnEnemy(typeName, atX, atY) {
+  const t = ENEMY_TYPES[typeName];
+  // Spawn just off the edge of the screen, aimed at the core.
+  let x, y;
+  if (atX !== undefined) { x = atX; y = atY; }
+  else {
+    const edge = randi(0, 3), m = 40;
+    if (edge === 0) { x = rand(-m, W+m); y = -m; }
+    else if (edge === 1) { x = W+m; y = rand(-m, H+m); }
+    else if (edge === 2) { x = rand(-m, W+m); y = H+m; }
+    else { x = -m; y = rand(-m, H+m); }
+  }
+  enemies.push({
+    type: typeName, x, y,
+    hp: t.hp, size: t.size, color: t.color, value: t.value,
+    speedMul: t.speedMul,
+    wiggle: !!t.wiggle, splits: !!t.splits,
+    wigglePhase: rand(0, TAU),
+    rot: rand(0, TAU), rotSpeed: rand(-3, 3),
+    flash: 0,
+  });
+}
+
+function spawnPowerup() {
+  const kind = POWERUP_TYPES[randi(0, POWERUP_TYPES.length - 1)];
+  const edge = randi(0, 3), m = 40;
+  let x, y;
+  if (edge === 0) { x = rand(W*0.2, W*0.8); y = -m; }
+  else if (edge === 1) { x = W+m; y = rand(H*0.2, H*0.8); }
+  else if (edge === 2) { x = rand(W*0.2, W*0.8); y = H+m; }
+  else { x = -m; y = rand(H*0.2, H*0.8); }
+  powerups.push({ kind, x, y, rot:0, pulse:0 });
+}
+
+// Particle burst — the heart of the "juice".
+function burst(x, y, color, count, power = 1) {
+  for (let i = 0; i < count; i++) {
+    const a = rand(0, TAU), sp = rand(40, 320) * power;
+    particles.push({
+      x, y,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      life: rand(0.3, 0.8), maxLife: 0.8,
+      size: rand(2, 5), color,
+    });
+  }
+}
+
+// Floating score text (e.g. "+30 x3").
+function floatText(x, y, text, color) {
+  floaters.push({ x, y, text, color, life: 0.9, vy: -42 });
+}
+
+
+/* =================================================================
+   7. FIRING
+   ================================================================= */
+function fire() {
+  // Turret position sits on the orbit ring around the core.
+  const tx = CX + Math.cos(turret.angle) * CONFIG.orbitRadius;
+  const ty = CY + Math.sin(turret.angle) * CONFIG.orbitRadius;
+  // Bullets travel OUTWARD, away from the core (that's the aim direction).
+  const baseDir = turret.angle;
+
+  // Multishot buff fires a 3-bullet spread.
+  const shots = buff.multishot > 0 ? [-0.16, 0, 0.16] : [0];
+  for (const off of shots) {
+    const d = baseDir + off;
+    bullets.push({
+      x: tx, y: ty,
+      vx: Math.cos(d) * CONFIG.bulletSpeed,
+      vy: Math.sin(d) * CONFIG.bulletSpeed,
+      life: CONFIG.bulletLife,
+    });
+  }
+  // Muzzle spark.
+  burst(tx, ty, CONFIG.bulletSpeed && "#cffaff", 3, 0.4);
+  stats.shotsFired += shots.length;
+  SFX.shoot();
+}
+
+
+/* =================================================================
+   8. GAME LIFECYCLE
+   ================================================================= */
+function startGame() {
+  score = 0; combo = 0; comboTimer = 0;
+  wave = 1; waveBannerTimer = 1.6;
+  coreHealth = CONFIG.coreMaxHealth; coreFlash = 0; corePulse = 0;
+  enemies = []; bullets = []; particles = []; powerups = []; floaters = [];
+  spawnTimer = 0.6; fireTimer = 0; elapsed = 0; powerupTimer = CONFIG.powerupInterval;
+  buff = { rapid:0, multishot:0 };
+  trauma = 0; freezeTimer = 0; flash.t = 0;
+  stats = { kills:0, shotsFired:0, shotsHit:0, maxCombo:0, runTime:0 };
+  turret.angle = turret.desiredAngle = -Math.PI/2;
+  state = STATE.PLAYING;
+}
+
+function gameOver() {
+  state = STATE.DEAD;
+  stats.runTime = elapsed;
+  if (score > highScore) {
+    highScore = score;
+    localStorage.setItem("coreDefenderHi", String(highScore));
+  }
+  addShake(0.9);
+  screenFlash("255,61,139", 0.4, 0.8);   // pink death flash
+  hitStop(0.12);                         // dramatic freeze on death
+  SFX.gameover();
+  burst(CX, CY, "#38f5ff", 60, 2);       // core explodes
+}
+
+
+/* =================================================================
+   9. UPDATE  (all simulation, dt = delta time in seconds)
+   ================================================================= */
+function update(dt) {
+  // Background life always animates a little.
+  gridPhase += dt * 8;
+  trauma = Math.max(0, trauma - dt * 1.4); // trauma decays smoothly
+  if (flash.t > 0) flash.t = Math.max(0, flash.t - dt); // flash always fades
+
+  if (state !== STATE.PLAYING) return;
+
+  // HIT-STOP: freeze the gameplay sim for a few frames after big impacts.
+  // We still return here so render() keeps drawing (and shake stays lively),
+  // but no positions/timers advance — that micro-pause is what sells weight.
+  if (freezeTimer > 0) { freezeTimer = Math.max(0, freezeTimer - dt); return; }
+
+  elapsed += dt;
+  corePulse += dt;
+  coreFlash = Math.max(0, coreFlash - dt * 3);
+
+  // ---- DIFFICULTY CURVE -------------------------------------------------
+  // Difficulty rises with elapsed time. Spawn gets faster, enemies faster.
+  const diff = elapsed / CONFIG.difficultyRamp;            // grows over time
+  const spawnInterval = Math.max(CONFIG.minSpawnInterval,
+                                 CONFIG.baseSpawnInterval / (1 + diff));
+  const enemySpeed = CONFIG.baseEnemySpeed * (1 + diff * 0.9);
+
+  // Wave counter ticks up roughly every 20s for flavor + escalation banners.
+  const newWave = 1 + Math.floor(elapsed / 20);
+  if (newWave > wave) { wave = newWave; waveBannerTimer = 1.6; }
+  waveBannerTimer = Math.max(0, waveBannerTimer - dt);
+
+  // ---- TURRET CONTROL ---------------------------------------------------
+  if (controlMode === "key") {
+    let dir = 0;
+    if (keys.ArrowLeft  || keys.KeyA) dir -= 1;
+    if (keys.ArrowRight || keys.KeyD) dir += 1;
+    turret.angle += dir * CONFIG.rotateSpeed * dt;
+  } else {
+    // Aim toward the mouse: the desired turret angle is the angle from the
+    // core to the cursor, so the turret orbits to "face" the cursor.
+    turret.desiredAngle = Math.atan2(mouse.y - CY, mouse.x - CX);
+    turret.angle = lerpAngle(turret.angle, turret.desiredAngle,
+                             clamp(CONFIG.mouseAimLerp * dt, 0, 1));
+  }
+  turret.angle = (turret.angle + TAU) % TAU;
+
+  // ---- FIRING -----------------------------------------------------------
+  for (const k in buff) buff[k] = Math.max(0, buff[k] - dt);
+  const effFireRate = buff.rapid > 0 ? CONFIG.fireRate * 0.4 : CONFIG.fireRate;
+  fireTimer -= dt;
+  const wantFire = keys.Space || mouse.down;
+  if (wantFire && fireTimer <= 0) { fire(); fireTimer = effFireRate; }
+
+  // ---- COMBO TIMER ------------------------------------------------------
+  if (comboTimer > 0) { comboTimer -= dt; if (comboTimer <= 0) combo = 0; }
+
+  // ---- SPAWNING ---------------------------------------------------------
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnTimer = spawnInterval;
+    spawnEnemy(pickEnemyType());
+    // At higher difficulty, occasionally spawn a bonus pair.
+    if (diff > 1.2 && Math.random() < 0.3) spawnEnemy(pickEnemyType());
+  }
+  powerupTimer -= dt;
+  if (powerupTimer <= 0 && Math.random() < CONFIG.powerupChance * 3) {
+    powerupTimer = CONFIG.powerupInterval;
+    spawnPowerup();
+  }
+
+  // ---- UPDATE ENEMIES ---------------------------------------------------
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    let dx = CX - e.x, dy = CY - e.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    dx /= dist; dy /= dist;
+
+    // Zigzag enemies weave perpendicular to their travel direction.
+    let mvx = dx, mvy = dy;
+    if (e.wiggle) {
+      e.wigglePhase += dt * 6;
+      const perpX = -dy, perpY = dx;
+      const w = Math.sin(e.wigglePhase) * 0.7;
+      mvx += perpX * w; mvy += perpY * w;
+      const n = Math.hypot(mvx, mvy) || 1; mvx /= n; mvy /= n;
+    }
+
+    const sp = enemySpeed * e.speedMul;
+    e.x += mvx * sp * dt;
+    e.y += mvy * sp * dt;
+    e.rot += e.rotSpeed * dt;
+    e.flash = Math.max(0, e.flash - dt * 5);
+
+    // Breached the core?
+    if (dist < CONFIG.coreRadius + e.size) {
+      coreHealth -= CONFIG.coreDamagePerHit;
+      coreFlash = 1;
+      addShake(CONFIG.shakeOnHit);
+      screenFlash("255,61,139", 0.16, 0.45); // pink edge flash on breach
+      hitStop(0.05);                          // small freeze for impact weight
+      SFX.breach();
+      burst(e.x, e.y, e.color, CONFIG.particlesPerBreach, 1.5);
+      enemies.splice(i, 1);
+      combo = 0; // breaching breaks your combo — keep them out!
+      if (coreHealth <= 0) { coreHealth = 0; gameOver(); return; }
+    }
+  }
+
+  // ---- UPDATE BULLETS + COLLISIONS -------------------------------------
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    b.life -= dt;
+    // Cull if dead or off-screen.
+    if (b.life <= 0 || b.x < -50 || b.x > W+50 || b.y < -50 || b.y > H+50) {
+      bullets.splice(i, 1); continue;
+    }
+    // Test against every enemy.
+    for (let j = enemies.length - 1; j >= 0; j--) {
+      const e = enemies[j];
+      if (Math.hypot(b.x - e.x, b.y - e.y) < e.size + CONFIG.bulletRadius) {
+        bullets.splice(i, 1);
+        e.hp -= 1; e.flash = 1;
+        stats.shotsHit += 1;
+        burst(b.x, b.y, e.color, 4, 0.5);
+        if (e.hp <= 0) killEnemy(j);
+        else SFX.hit();
+        break;
+      }
+    }
+  }
+
+  // ---- UPDATE POWER-UPS -------------------------------------------------
+  for (let i = powerups.length - 1; i >= 0; i--) {
+    const p = powerups[i];
+    let dx = CX - p.x, dy = CY - p.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    p.x += (dx / dist) * 70 * dt;
+    p.y += (dy / dist) * 70 * dt;
+    p.rot += dt * 2; p.pulse += dt * 6;
+
+    // Collected by shooting it.
+    let collected = false;
+    for (let j = bullets.length - 1; j >= 0; j--) {
+      const b = bullets[j];
+      if (Math.hypot(b.x - p.x, b.y - p.y) < 20) { bullets.splice(j,1); collected = true; break; }
+    }
+    if (collected) { applyPowerup(p); powerups.splice(i, 1); continue; }
+    // Or lost if it reaches the core.
+    if (dist < CONFIG.coreRadius + 16) powerups.splice(i, 1);
+  }
+
+  // ---- UPDATE PARTICLES -------------------------------------------------
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vx *= 0.92; p.vy *= 0.92;       // drag for a snappy settle
+    p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  // ---- UPDATE FLOATING TEXT --------------------------------------------
+  for (let i = floaters.length - 1; i >= 0; i--) {
+    const f = floaters[i];
+    f.y += f.vy * dt; f.vy *= 0.94; f.life -= dt;
+    if (f.life <= 0) floaters.splice(i, 1);
+  }
+}
+
+// Handle an enemy death: scoring, combo, splitting, juice.
+function killEnemy(index) {
+  const e = enemies[index];
+
+  // Combo logic — chaining kills within the window ramps the multiplier.
+  if (comboTimer > 0) combo = Math.min(CONFIG.maxCombo, combo + 1);
+  else combo = 1;
+  comboTimer = CONFIG.comboWindow;
+
+  const gained = e.value * combo;
+  score += gained;
+  stats.kills += 1;
+  if (combo > stats.maxCombo) stats.maxCombo = combo;
+  floatText(e.x, e.y, "+" + gained + (combo > 1 ? "  x" + combo : ""),
+            combo > 1 ? "#ffd23f" : "#ffffff");
+
+  burst(e.x, e.y, e.color, CONFIG.particlesPerKill, 1);
+  addShake(CONFIG.shakeOnKill);
+  SFX.kill();
+  // Bigger enemies earn a tiny freeze-frame for extra punch.
+  if (e.size >= 20) hitStop(0.04);
+
+  enemies.splice(index, 1);
+
+  // Splitters spawn two grunts where they died.
+  if (e.splits) {
+    spawnEnemy("grunt", e.x + rand(-10,10), e.y + rand(-10,10));
+    spawnEnemy("grunt", e.x + rand(-10,10), e.y + rand(-10,10));
+  }
+}
+
+function applyPowerup(p) {
+  floatText(p.x, p.y, powerupLabel(p.kind), "#3dff9e");
+  burst(p.x, p.y, "#3dff9e", 22, 1.2);
+  screenFlash("61,255,158", 0.15, 0.3);  // green pickup flash
+  SFX.powerup();
+  switch (p.kind) {
+    case "rapid":     buff.rapid = 6;     break;
+    case "multishot": buff.multishot = 8; break;
+    case "heal":      coreHealth = clamp(coreHealth + 25, 0, CONFIG.coreMaxHealth); break;
+    case "bomb":      // Clear the screen, score every enemy cleared.
+      addShake(0.5);
+      screenFlash("255,255,255", 0.22, 0.6);
+      for (let i = enemies.length - 1; i >= 0; i--) {
+        score += enemies[i].value;
+        burst(enemies[i].x, enemies[i].y, enemies[i].color, 8, 0.8);
+      }
+      enemies = [];
+      break;
+  }
+}
+function powerupLabel(k){return {rapid:"RAPID FIRE",bomb:"PURGE!",heal:"+REPAIR",multishot:"TRI-SHOT"}[k];}
+function powerupIcon(k){ return {rapid:"⚡",bomb:"💥",heal:"➕",multishot:"🔱"}[k]; }
+
+
+/* =================================================================
+   10. RENDER
+   ================================================================= */
+function render() {
+  ctx.clearRect(0, 0, W, H);
+
+  // --- SCREEN SHAKE ---
+  // shake = trauma^2 gives a punchy, non-linear feel. Apply as a translate.
+  const shakeAmt = trauma * trauma * 22;
+  const sx = rand(-shakeAmt, shakeAmt);
+  const sy = rand(-shakeAmt, shakeAmt);
+  ctx.save();
+  ctx.translate(sx, sy);
+
+  drawBackground();
+  drawCore();
+  drawPowerups();
+  drawEnemies();
+  drawBullets();
+  drawTurret();
+  drawParticles();
+  drawFloaters();
+
+  ctx.restore();      // end shake
+
+  drawDamageVignette(); // red edge-glow that intensifies as the core weakens
+  drawFlash();          // full-screen impact flash
+  drawHUD();            // HUD is drawn un-shaken for readability
+  if (state === STATE.MENU)   drawMenu();
+  if (state === STATE.DEAD)   drawDeath();
+  if (state === STATE.PAUSED) drawPaused();
+}
+
+// Red glow creeping from the edges as core health drops — pure tension.
+function drawDamageVignette() {
+  if (state !== STATE.PLAYING && state !== STATE.PAUSED) return;
+  const hpFrac = coreHealth / CONFIG.coreMaxHealth;
+  if (hpFrac > 0.6) return;                       // only when actually hurt
+  // Pulse faster the closer to death.
+  const danger = 1 - (hpFrac / 0.6);              // 0 at 60% hp -> 1 at 0 hp
+  const pulse = 0.6 + 0.4 * Math.sin(elapsedReal * (4 + danger * 6));
+  const intensity = danger * pulse * 0.55;
+  const g = ctx.createRadialGradient(CX, CY, Math.min(W,H)*0.3, CX, CY, Math.max(W,H)*0.7);
+  g.addColorStop(0, "rgba(255,61,139,0)");
+  g.addColorStop(1, "rgba(255,61,139," + intensity.toFixed(3) + ")");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+}
+
+// Brief full-screen color flash (decays via flash.t).
+function drawFlash() {
+  if (flash.t <= 0) return;
+  const a = (flash.t / flash.max) * (flash.strength || 0.5);
+  ctx.fillStyle = "rgba(" + flash.color + "," + a.toFixed(3) + ")";
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawBackground() {
+  // Subtle moving grid for retro depth.
+  const spacing = 46;
+  const off = (gridPhase % spacing);
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--grid") || "rgba(56,245,255,0.06)";
+  ctx.beginPath();
+  for (let x = -off; x < W; x += spacing) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+  for (let y = -off; y < H; y += spacing) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+  ctx.stroke();
+}
+
+function drawCore() {
+  ctx.save();
+  ctx.translate(CX, CY);
+
+  const pulse = 1 + Math.sin(corePulse * 3) * 0.04;
+  const r = CONFIG.coreRadius * pulse;
+  const hpFrac = coreHealth / CONFIG.coreMaxHealth;
+
+  // Core color shifts from cyan (healthy) toward pink (critical).
+  const coreColor = hpFrac > 0.5 ? "#38f5ff" : (hpFrac > 0.25 ? "#ffd23f" : "#ff3d8b");
+
+  // Glow.
+  ctx.shadowBlur = 30 + (coreFlash * 40);
+  ctx.shadowColor = coreFlash > 0 ? "#ffffff" : coreColor;
+
+  // Rotating hexagon core.
+  ctx.rotate(corePulse * 0.4);
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * TAU;
+    const px = Math.cos(a) * r, py = Math.sin(a) * r;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fillStyle = coreFlash > 0 ? "rgba(255,255,255,0.9)" : "rgba(10,18,30,0.85)";
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = coreColor;
+  ctx.stroke();
+
+  // Inner pulsing dot.
+  ctx.rotate(-corePulse * 0.8);
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 0.35, 0, TAU);
+  ctx.fillStyle = coreColor;
+  ctx.fill();
+  ctx.restore();
+
+  // --- Health ring around the core (arc that depletes) ---
+  ctx.save();
+  ctx.translate(CX, CY);
+  ctx.shadowBlur = 12; ctx.shadowColor = coreColor;
+  ctx.lineWidth = 5; ctx.lineCap = "round";
+  ctx.strokeStyle = "rgba(255,255,255,0.08)";
+  ctx.beginPath(); ctx.arc(0, 0, CONFIG.coreRadius + 14, 0, TAU); ctx.stroke();
+  ctx.strokeStyle = coreColor;
+  ctx.beginPath();
+  ctx.arc(0, 0, CONFIG.coreRadius + 14, -Math.PI/2, -Math.PI/2 + TAU * hpFrac);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawTurret() {
+  const tx = CX + Math.cos(turret.angle) * CONFIG.orbitRadius;
+  const ty = CY + Math.sin(turret.angle) * CONFIG.orbitRadius;
+
+  // Faint orbit guide ring.
+  ctx.save();
+  ctx.strokeStyle = "rgba(56,245,255,0.10)";
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(CX, CY, CONFIG.orbitRadius, 0, TAU); ctx.stroke();
+  ctx.restore();
+
+  ctx.save();
+  ctx.translate(tx, ty);
+  ctx.rotate(turret.angle); // point the nose outward
+  const s = CONFIG.turretSize;
+
+  ctx.shadowBlur = 18;
+  ctx.shadowColor = buff.rapid > 0 ? "#ffd23f" : "#38f5ff";
+
+  // Ship triangle.
+  ctx.beginPath();
+  ctx.moveTo(s, 0);
+  ctx.lineTo(-s * 0.7,  s * 0.7);
+  ctx.lineTo(-s * 0.3, 0);
+  ctx.lineTo(-s * 0.7, -s * 0.7);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(10,30,40,0.9)";
+  ctx.fill();
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = buff.rapid > 0 ? "#ffd23f" : "#38f5ff";
+  ctx.stroke();
+
+  // Engine flame flicker.
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.7, 0);
+  ctx.lineTo(-s * (0.7 + Math.random() * 0.5), 0);
+  ctx.strokeStyle = "#ff7b3d";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawEnemies() {
+  for (const e of enemies) {
+    ctx.save();
+    ctx.translate(e.x, e.y);
+    ctx.rotate(e.rot);
+    ctx.shadowBlur = 14; ctx.shadowColor = e.color;
+    ctx.fillStyle = e.flash > 0 ? "#ffffff" : "rgba(10,12,24,0.85)";
+    ctx.strokeStyle = e.flash > 0 ? "#ffffff" : e.color;
+    ctx.lineWidth = 2.5;
+    // Corrupted data block = a glitchy square.
+    ctx.beginPath();
+    ctx.rect(-e.size, -e.size, e.size * 2, e.size * 2);
+    ctx.fill(); ctx.stroke();
+    // Inner cross detail.
+    ctx.beginPath();
+    ctx.moveTo(-e.size*0.5,0); ctx.lineTo(e.size*0.5,0);
+    ctx.moveTo(0,-e.size*0.5); ctx.lineTo(0,e.size*0.5);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawBullets() {
+  ctx.save();
+  ctx.shadowBlur = 10; ctx.shadowColor = "#cffaff";
+  ctx.fillStyle = "#cffaff";
+  for (const b of bullets) {
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, CONFIG.bulletRadius, 0, TAU);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawPowerups() {
+  for (const p of powerups) {
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    const sc = 1 + Math.sin(p.pulse) * 0.12;
+    ctx.scale(sc, sc);
+    ctx.shadowBlur = 18; ctx.shadowColor = "#3dff9e";
+    ctx.strokeStyle = "#3dff9e"; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(0, 0, 16, 0, TAU); ctx.stroke();
+    ctx.font = "16px monospace"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(powerupIcon(p.kind), 0, 1);
+    ctx.restore();
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const a = clamp(p.life / p.maxLife, 0, 1);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size/2, p.y - p.size/2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawFloaters() {
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  for (const f of floaters) {
+    ctx.globalAlpha = clamp(f.life / 0.9, 0, 1);
+    ctx.font = "bold 18px monospace";
+    ctx.fillStyle = f.color;
+    ctx.shadowBlur = 8; ctx.shadowColor = f.color;
+    ctx.fillText(f.text, f.x, f.y);
+  }
+  ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+}
+
+
+/* =================================================================
+   11. HUD + SCREENS
+   ================================================================= */
+function drawHUD() {
+  ctx.save();
+  ctx.shadowBlur = 0;
+  ctx.textBaseline = "top";
+
+  // Score (top-left)
+  ctx.textAlign = "left";
+  ctx.font = "bold 30px monospace";
+  ctx.fillStyle = "#38f5ff";
+  ctx.fillText("SCORE " + (score|0), 24, 22);
+
+  ctx.font = "14px monospace";
+  ctx.fillStyle = "rgba(255,255,255,0.5)";
+  ctx.fillText("HI " + highScore, 24, 56);
+
+  // Wave (top-right)
+  ctx.textAlign = "right";
+  ctx.font = "bold 20px monospace";
+  ctx.fillStyle = "#ffd23f";
+  ctx.fillText("WAVE " + wave, W - 24, 24);
+
+  // Combo meter (top-center, only when active)
+  if (combo > 1 && state === STATE.PLAYING) {
+    ctx.textAlign = "center";
+    ctx.font = "bold 26px monospace";
+    ctx.fillStyle = "#ffd23f";
+    ctx.shadowBlur = 12; ctx.shadowColor = "#ffd23f";
+    ctx.fillText("COMBO x" + combo, CX, 22);
+    // Combo timer bar.
+    const w = 160, frac = clamp(comboTimer / CONFIG.comboWindow, 0, 1);
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "rgba(255,255,255,0.15)";
+    ctx.fillRect(CX - w/2, 54, w, 5);
+    ctx.fillStyle = "#ffd23f";
+    ctx.fillRect(CX - w/2, 54, w * frac, 5);
+  }
+
+  // Active buffs (bottom-left chips)
+  let bx = 24, by = H - 40;
+  if (buff.rapid > 0)     { drawBuffChip(bx, by, "⚡ RAPID " + buff.rapid.toFixed(0)); bx += 150; }
+  if (buff.multishot > 0) { drawBuffChip(bx, by, "🔱 TRI " + buff.multishot.toFixed(0)); }
+
+  // Sound state (bottom-right)
+  ctx.textAlign = "right"; ctx.textBaseline = "top";
+  ctx.font = "13px monospace";
+  ctx.fillStyle = "rgba(255,255,255,0.4)";
+  ctx.fillText((muted ? "🔇 MUTED" : "🔊 SOUND") + "  [M]", W - 24, H - 34);
+
+  ctx.restore();
+}
+function drawBuffChip(x, y, label) {
+  ctx.font = "14px monospace"; ctx.textAlign = "left"; ctx.textBaseline = "top";
+  ctx.fillStyle = "rgba(255,210,63,0.15)";
+  ctx.fillRect(x, y, ctx.measureText(label).width + 16, 24);
+  ctx.fillStyle = "#ffd23f";
+  ctx.fillText(label, x + 8, y + 5);
+}
+
+// Reusable centered title/subtitle overlay panel.
+function overlayPanel() {
+  ctx.fillStyle = "rgba(5,6,12,0.7)";
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawMenu() {
+  overlayPanel();
+  ctx.textAlign = "center"; ctx.shadowBlur = 0;
+
+  ctx.font = "bold 64px monospace";
+  ctx.fillStyle = "#38f5ff";
+  ctx.shadowBlur = 24; ctx.shadowColor = "#38f5ff";
+  ctx.fillText("CORE DEFENDER", CX, CY - 120);
+  ctx.shadowBlur = 0;
+
+  ctx.font = "18px monospace";
+  ctx.fillStyle = "rgba(255,255,255,0.8)";
+  ctx.fillText("Defend the CPU core from corrupted data blocks.", CX, CY - 56);
+
+  ctx.font = "16px monospace";
+  ctx.fillStyle = "#ffd23f";
+  ctx.fillText("A / D  or  ◄ ►  —  rotate turret", CX, CY - 6);
+  ctx.fillText("MOUSE  —  aim    •    SPACE / CLICK  —  fire", CX, CY + 22);
+
+  // Blinking start prompt.
+  if (Math.floor(elapsedReal * 2) % 2 === 0) {
+    ctx.font = "bold 24px monospace";
+    ctx.fillStyle = "#38f5ff";
+    ctx.fillText("▶  CLICK or PRESS SPACE to START", CX, CY + 86);
+  }
+
+  ctx.font = "14px monospace";
+  ctx.fillStyle = "rgba(255,255,255,0.4)";
+  ctx.fillText("HIGH SCORE  " + highScore + "    •    P pause    •    M mute", CX, CY + 140);
+}
+
+function drawDeath() {
+  overlayPanel();
+  ctx.textAlign = "center"; ctx.shadowBlur = 0;
+
+  ctx.font = "bold 56px monospace";
+  ctx.fillStyle = "#ff3d8b";
+  ctx.shadowBlur = 24; ctx.shadowColor = "#ff3d8b";
+  ctx.fillText("CORE BREACHED", CX, CY - 168);
+  ctx.shadowBlur = 0;
+
+  ctx.font = "bold 38px monospace";
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText("SCORE  " + (score|0), CX, CY - 96);
+
+  const isNew = score >= highScore && score > 0;
+  ctx.font = "18px monospace";
+  ctx.fillStyle = isNew ? "#ffd23f" : "rgba(255,255,255,0.6)";
+  ctx.fillText(isNew ? "★ NEW HIGH SCORE ★" : "HIGH SCORE  " + highScore, CX, CY - 56);
+
+  // --- RUN STATS PANEL ---
+  const acc = stats.shotsFired ? Math.round((stats.shotsHit / stats.shotsFired) * 100) : 0;
+  const mins = Math.floor(stats.runTime / 60);
+  const secs = Math.floor(stats.runTime % 60);
+  const timeStr = mins + ":" + String(secs).padStart(2, "0");
+  const rows = [
+    ["TIME SURVIVED", timeStr],
+    ["WAVES CLEARED", String(wave)],
+    ["BLOCKS DESTROYED", String(stats.kills)],
+    ["BEST COMBO", "x" + stats.maxCombo],
+    ["ACCURACY", acc + "%"],
+  ];
+  const pw = 360, ph = rows.length * 30 + 24, px = CX - pw/2, py = CY - 28;
+  ctx.fillStyle = "rgba(56,245,255,0.05)";
+  ctx.fillRect(px, py, pw, ph);
+  ctx.strokeStyle = "rgba(56,245,255,0.25)"; ctx.lineWidth = 1;
+  ctx.strokeRect(px, py, pw, ph);
+  ctx.font = "16px monospace"; ctx.textBaseline = "middle";
+  for (let i = 0; i < rows.length; i++) {
+    const ry = py + 24 + i * 30;
+    ctx.textAlign = "left";
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.fillText(rows[i][0], px + 20, ry);
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#38f5ff";
+    ctx.fillText(rows[i][1], px + pw - 20, ry);
+  }
+  ctx.textBaseline = "top";
+
+  if (Math.floor(elapsedReal * 2) % 2 === 0) {
+    ctx.textAlign = "center";
+    ctx.font = "bold 22px monospace";
+    ctx.fillStyle = "#38f5ff";
+    ctx.fillText("▶  PRESS  R  or  CLICK  to RETRY", CX, py + ph + 28);
+  }
+}
+
+function drawPaused() {
+  overlayPanel();
+  ctx.textAlign = "center";
+  ctx.font = "bold 48px monospace";
+  ctx.fillStyle = "#38f5ff";
+  ctx.fillText("PAUSED", CX, CY - 20);
+  ctx.font = "18px monospace";
+  ctx.fillStyle = "rgba(255,255,255,0.6)";
+  ctx.fillText("press P to resume", CX, CY + 30);
+}
+
+
+/* =================================================================
+   12. MAIN LOOP  (delta-timed for consistent speed on any monitor)
+   ================================================================= */
+let lastTime = performance.now();
+let elapsedReal = 0; // wall-clock time, used for blinking UI
+
+function loop(now) {
+  let dt = (now - lastTime) / 1000;
+  lastTime = now;
+  // Clamp dt so a background tab / hitch doesn't teleport everything.
+  dt = Math.min(dt, 0.05);
+  elapsedReal += dt;
+
+  update(dt);
+  render();
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
