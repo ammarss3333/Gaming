@@ -1,0 +1,14 @@
+ASSET CREDITS
+=============
+Hero character model: "RobotExpressive"
+  - Source: three.js examples (examples/models/gltf/RobotExpressive)
+  - Author: Tomás Laulhé  (https://www.patreon.com/quaternius)
+  - Modifications: Don McCurdy
+  - License: CC0 1.0 Universal (public domain)
+  - Embedded base64 in assets/robot.glb.js so the game runs offline.
+
+Three.js (r160) — MIT License — https://threejs.org
+  - lib/three/three.min.js (global build)
+  - lib/three/three-gltfloader.js (bundled GLTFLoader + BufferGeometryUtils)
+
+All other art (monsters, world, UI) is generated procedurally in code.
