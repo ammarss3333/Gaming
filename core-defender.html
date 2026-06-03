@@ -7,6 +7,10 @@
 
 <!-- Three.js vendored LOCALLY (global build) — fully offline, double-click to play. -->
 <script src="lib/three/three.min.js"></script>
+<script src="lib/three/three-gltfloader.js"></script>
+<!-- Real CC0 animated hero model (RobotExpressive), base64-embedded so it
+     parses offline from file:// with no fetch/CORS issues. -->
+<script src="assets/robot.glb.js"></script>
 
 <style>
   /* ============================================================
@@ -122,6 +126,14 @@
   <div id="lowhp"></div>
   <div id="flash"></div>
 
+  <!-- LOADING (shown until the hero asset is ready) -->
+  <div id="loading" class="overlay show">
+    <div class="panel">
+      <div class="title toon" style="font-size:40px">LOADING…</div>
+      <div class="lead">summoning your hero 🤖</div>
+    </div>
+  </div>
+
   <!-- HUD -->
   <div id="hud">
     <div id="score" class="hud-el toon">0</div>
@@ -152,7 +164,7 @@
   <div id="bossbar"><div id="bossfill"></div></div>
 
   <!-- MENU -->
-  <div id="menu" class="overlay show">
+  <div id="menu" class="overlay">
     <div class="panel">
       <div class="title toon">BLOB BUSTERS</div>
       <div class="subtitle toon">survive the goo!</div>
@@ -231,7 +243,7 @@ const CONFIG = {
   difficultyRamp:    78,
   waveSeconds:       26,
   bossEveryWaves:    5,
-  enemyCap:          140,
+  enemyCap:          120,
 
   // XP / leveling
   baseXpToLevel:    5,
@@ -321,13 +333,15 @@ const camera = new THREE.PerspectiveCamera(52, innerWidth/innerHeight, 0.1, 400)
 const CAM_OFFSET = new THREE.Vector3(0, 20, 17);
 camera.position.copy(CAM_OFFSET);
 
-// Friendly outdoor lighting.
-scene.add(new THREE.HemisphereLight(0xcdeeff, 0x6b8f3a, 0.95));
-const sun = new THREE.DirectionalLight(0xfff3d6, 1.15); sun.position.set(12, 22, 8); scene.add(sun);
-scene.add(new THREE.AmbientLight(0xffffff, 0.25));
+// Friendly outdoor lighting (key sun + sky/ground bounce + warm fill + cool rim).
+scene.add(new THREE.HemisphereLight(0xd6f0ff, 0x6f9a3f, 1.0));
+const sun = new THREE.DirectionalLight(0xfff3d6, 1.2); sun.position.set(14, 24, 10); scene.add(sun);
+const fill = new THREE.DirectionalLight(0xffdca8, 0.35); fill.position.set(-10, 8, -6); scene.add(fill);
+const rim  = new THREE.DirectionalLight(0xbfe0ff, 0.4);  rim.position.set(-4, 6, 12);  scene.add(rim);
+scene.add(new THREE.AmbientLight(0xffffff, 0.22));
 
-// Toon cel-shading ramp (a few flat tones).
-const _tones = new Uint8Array([90, 160, 220, 255]);
+// Toon cel-shading ramp (soft 3-tone wrap).
+const _tones = new Uint8Array([120, 190, 255]);
 const gradMap = new THREE.DataTexture(_tones, _tones.length, 1, THREE.RedFormat);
 gradMap.needsUpdate = true; gradMap.minFilter = THREE.NearestFilter; gradMap.magFilter = THREE.NearestFilter; gradMap.generateMipmaps = false;
 function toonMat(color){ return new THREE.MeshToonMaterial({ color, gradientMap:gradMap }); }
@@ -374,71 +388,131 @@ for(let i=0;i<46;i++){
 }
 
 // Shared geometries.
-const GEO={ sphere:new THREE.SphereGeometry(1,16,14), ball:new THREE.SphereGeometry(1,12,10),
+const GEO={ sphere:new THREE.SphereGeometry(1,18,14), ball:new THREE.SphereGeometry(1,12,10),
   ring:new THREE.RingGeometry(0.86,1,40), disc:new THREE.CircleGeometry(1,32),
   coin:new THREE.CylinderGeometry(1,1,0.22,16),
   cone:new THREE.ConeGeometry(0.8,1.5,8), capsuleG:new THREE.CapsuleGeometry(0.7,0.5,6,12),
-  horn:new THREE.ConeGeometry(0.14,0.45,6), brow:new THREE.BoxGeometry(0.28,0.07,0.07) };
+  horn:new THREE.ConeGeometry(0.16,0.5,7), brow:new THREE.BoxGeometry(0.3,0.08,0.08),
+  limbBig:new THREE.CapsuleGeometry(0.22,0.5,5,9), wing:new THREE.ConeGeometry(0.6,1.0,3),
+  torusM:new THREE.TorusGeometry(0.5,0.12,8,18) };
 const BULLET_MAT={ normal:toonMat(0xfff0a0), crit:toonMat(0xff6aa0), drone:toonMat(0x9be86b) };
-const HORN_MAT=toonMat(0xf2e6c0); // shared
+const HORN_MAT=toonMat(0xf2e6c0), BAND_MAT=toonMat(0x2f9e4f), WING_MAT=toonMat(0x3a2a44);
+const EYE_GLOW=new THREE.MeshBasicMaterial({ color:0xff3b3b });
+const SHINE=new THREE.MeshBasicMaterial({ color:0xffffff, transparent:true, opacity:0.7 });
 const COIN_MAT=new THREE.MeshToonMaterial({ color:0xffcb3d, gradientMap:gradMap });
-const SHADOW_MAT=new THREE.MeshBasicMaterial({ color:0x000000, transparent:true, opacity:0.22, depthWrite:false });
 
-function blobShadow(parent, r){
-  const s=new THREE.Mesh(GEO.disc, SHADOW_MAT); s.rotation.x=-Math.PI/2; s.position.y=0.03; s.scale.setScalar(r); parent.add(s); return s;
+// Soft round drop-shadow (radial-gradient sprite) shared by everyone.
+const SHADOW_TEX=(()=>{ const c=document.createElement("canvas"); c.width=c.height=64; const x=c.getContext("2d");
+  const g=x.createRadialGradient(32,32,2,32,32,30); g.addColorStop(0,"rgba(0,0,0,0.5)"); g.addColorStop(1,"rgba(0,0,0,0)");
+  x.fillStyle=g; x.fillRect(0,0,64,64); return new THREE.CanvasTexture(c); })();
+const SHADOW_MAT=new THREE.MeshBasicMaterial({ map:SHADOW_TEX, transparent:true, depthWrite:false });
+function blobShadow(parent, r){ const s=new THREE.Mesh(GEO.disc, SHADOW_MAT); s.rotation.x=-Math.PI/2; s.position.y=0.04; s.scale.setScalar(r); parent.add(s); return s; }
+
+/* ---- Reusable cartoon face helpers (shared, cheap) ---- */
+function addEyes(g, fwd, ey, s, glow){
+  for(const side of [-1,1]){ const z=side*0.22;
+    const e=new THREE.Mesh(GEO.ball, glow?EYE_GLOW:WHITE); e.scale.set(s,s*1.15,s); e.position.set(fwd,ey,z); g.add(e);
+    const p=new THREE.Mesh(GEO.ball, BLACK); p.scale.setScalar(s*0.5); p.position.set(fwd+0.13,ey,z); g.add(p);
+    const sh=new THREE.Mesh(GEO.ball, WHITE); sh.scale.setScalar(s*0.24); sh.position.set(fwd+0.17,ey+0.07,z-0.05); g.add(sh); }
 }
+function addBrows(g, fwd, ey){ for(const [z,rot] of [[-0.22,0.5],[0.22,-0.5]]){ const b=new THREE.Mesh(GEO.brow,BLACK); b.position.set(fwd,ey+0.2,z); b.rotation.x=rot; g.add(b); } }
+function addMouth(g, fwd, y, w){ const m=new THREE.Mesh(GEO.ball,BLACK); m.scale.set(0.1,0.14*w,0.22*w); m.position.set(fwd+0.02,y,0); g.add(m); }
 
-/* ---- Build the hero character ---- */
-function buildHero(){
-  const g=new THREE.Group();
-  blobShadow(g, 0.8);
+/* ---- HERO: real animated GLB (RobotExpressive, CC0) + procedural fallback ---- */
+const HERO_YAW = Math.PI/2;   // model faces +Z by default; tweak if it ends up facing wrong
+let heroModel=null;
+function finishLoading(){ const l=document.getElementById("loading"); if(l) l.classList.remove("show");
+  const m=document.getElementById("menu"); if(m) m.classList.add("show"); }
+function setHeroAnim(name, once){
+  if(!heroModel||!heroModel.isGLB) return; const a=heroModel.actions[name]; if(!a) return;
+  if(heroModel.current===a && !once) return;
+  const prev=heroModel.current;
+  a.reset(); a.enabled=true; a.setEffectiveTimeScale(1); a.setEffectiveWeight(1);
+  if(once){ a.setLoop(THREE.LoopOnce,1); a.clampWhenFinished=true; } else a.setLoop(THREE.LoopRepeat,Infinity);
+  a.fadeIn(0.18); if(prev && prev!==a) prev.fadeOut(0.18); a.play();
+  heroModel.current=a; heroModel.currentName=name;
+}
+function setupHeroFromGLB(gltf){
+  const root=gltf.scene;
+  const box=new THREE.Box3().setFromObject(root); const sz=new THREE.Vector3(); box.getSize(sz);
+  root.scale.setScalar(2.6/sz.y);
+  const box2=new THREE.Box3().setFromObject(root); root.position.y=-box2.min.y; // feet on ground
+  root.traverse(o=>{ if(o.isMesh){ o.frustumCulled=false; if(o.material){ o.material.metalness=0.0; o.material.roughness=0.85; } } });
+  const rig=new THREE.Group(); rig.add(root); scene.add(rig);
+  blobShadow(rig, 0.95);
+  const mixer=new THREE.AnimationMixer(root); const actions={};
+  for(const clip of gltf.animations) actions[clip.name]=mixer.clipAction(clip);
+  heroModel={ group:rig, isGLB:true, mixer, actions, current:null, currentName:"" };
+  setHeroAnim("Idle"); finishLoading();
+}
+function loadHero(){
+  try{
+    if(typeof THREE.GLTFLoader!=="function" || !window.ROBOT_GLB_B64) throw new Error("no GLB");
+    const bin=atob(window.ROBOT_GLB_B64), n=bin.length, bytes=new Uint8Array(n);
+    for(let i=0;i<n;i++) bytes[i]=bin.charCodeAt(i);
+    new THREE.GLTFLoader().parse(bytes.buffer, "", setupHeroFromGLB,
+      err=>{ console.warn("Hero GLB failed; using fallback:", err); heroModel=buildProceduralHero(); finishLoading(); });
+  } catch(e){ console.warn("Hero GLB unavailable; using fallback:", e); heroModel=buildProceduralHero(); finishLoading(); }
+}
+function buildProceduralHero(){
+  const g=new THREE.Group(); blobShadow(g, 0.8);
   const body=new THREE.Mesh(new THREE.CapsuleGeometry(0.42,0.55,6,12), toonMat(0x3aa0ff)); body.position.y=0.95; outline(body); g.add(body);
   const head=new THREE.Mesh(GEO.sphere, toonMat(0xffd9a8)); head.scale.setScalar(0.42); head.position.y=1.7; outline(head); g.add(head);
   const cap=new THREE.Mesh(new THREE.SphereGeometry(0.45,14,10,0,Math.PI*2,0,Math.PI*0.55), toonMat(0xff5a5a)); cap.position.y=1.78; g.add(cap);
-  // Eyes (face +X = aim/forward).
-  const mkEye=(z)=>{ const e=new THREE.Mesh(GEO.ball,WHITE); e.scale.setScalar(0.12); e.position.set(0.34,1.72,z); g.add(e);
-    const p=new THREE.Mesh(GEO.ball,BLACK); p.scale.setScalar(0.06); p.position.set(0.42,1.72,z); g.add(p); };
-  mkEye(-0.16); mkEye(0.16);
-  // Arms.
+  addEyes(g,0.34,1.72,0.12,false);
   const armGeo=new THREE.CapsuleGeometry(0.14,0.35,4,8);
   const armL=new THREE.Mesh(armGeo,toonMat(0x2f87e0)); armL.position.set(0,1.0,0.5); g.add(armL);
   const armR=new THREE.Mesh(armGeo,toonMat(0x2f87e0)); armR.position.set(0,1.0,-0.5); g.add(armR);
-  // Legs.
   const legGeo=new THREE.CapsuleGeometry(0.16,0.3,4,8);
   const legL=new THREE.Mesh(legGeo,toonMat(0x2b2440)); legL.position.set(0,0.4,0.2); g.add(legL);
   const legR=new THREE.Mesh(legGeo,toonMat(0x2b2440)); legR.position.set(0,0.4,-0.2); g.add(legR);
-  // Blaster (points +X).
   const gun=new THREE.Mesh(new THREE.BoxGeometry(0.8,0.24,0.24), toonMat(0x444a66)); gun.position.set(0.55,1.0,0.3); outline(gun,1.12); g.add(gun);
   const tip=new THREE.Mesh(GEO.ball, toonMat(0xffe14d)); tip.scale.setScalar(0.13); tip.position.set(1.0,1.0,0.3); g.add(tip);
   scene.add(g);
-  return { group:g, body, armL, armR, legL, legR };
+  return { group:g, isGLB:false, body, armL, armR, legL, legR };
 }
 
-/* ---- Build a cartoon monster ---- */
+/* ---- Build a cartoon MONSTER — a distinct creature per type ---- */
 function buildMonster(type){
-  const t=ENEMY_TYPES[type], g=new THREE.Group();
-  if(t.size>=1.0||t.boss) blobShadow(g, t.size*0.9);
-  // Body shape varies per archetype — all use SHARED geometries (only the
-  // body material is unique, so we can recolor it on hit and dispose it on death).
-  const bodyMat=toonMat(t.color);
-  let body;
-  if(t.shape==="imp"){ body=new THREE.Mesh(GEO.cone, bodyMat); body.position.y=0.7; }
-  else if(t.shape==="ghost"){ body=new THREE.Mesh(GEO.capsuleG, bodyMat); body.position.y=0.85; }
-  else { body=new THREE.Mesh(GEO.sphere, bodyMat); body.position.y=0.8; } // slime/brute blob
-  outline(body, 1.08); g.add(body);
-  // Eyes (front = +X).
-  const ef=Math.max(0.7,t.size*0.7), eScale=t.boss?0.22:0.16, eo=0.22*ef;
-  const mkEye=(z)=>{ const e=new THREE.Mesh(GEO.ball,WHITE); e.scale.setScalar(eScale); e.position.set(0.55*ef,0.95,z); g.add(e);
-    const p=new THREE.Mesh(GEO.ball,BLACK); p.scale.setScalar(eScale*0.55); p.position.set(0.62*ef,0.95,z); g.add(p); };
-  mkEye(-eo); mkEye(eo);
-  // Angry eyebrows + horns for brutes/boss (shared geo + materials).
-  if(t.shape==="brute"||t.boss){
-    [[-eo,0.35],[eo,-0.35]].forEach(([z,rot])=>{ const b=new THREE.Mesh(GEO.brow,BLACK); b.position.set(0.6*ef,1.12,z); b.rotation.x=rot; g.add(b); });
-    [-1,1].forEach(s=>{ const h=new THREE.Mesh(GEO.horn,HORN_MAT); h.position.set(0.1,1.35,s*0.3); h.rotation.z=-0.3*s; g.add(h); });
+  const t=ENEMY_TYPES[type], g=new THREE.Group(), p={}; const bodyMat=toonMat(t.color);
+  blobShadow(g, Math.max(0.55, t.size*0.85));
+  let bodyMesh;
+  if(type==="grunt"||type==="splitter"){            // SLIME
+    bodyMesh=new THREE.Mesh(GEO.sphere, bodyMat); bodyMesh.scale.set(1,0.82,1); bodyMesh.position.y=0.78; outline(bodyMesh,1.07); g.add(bodyMesh);
+    const sh=new THREE.Mesh(GEO.ball, SHINE); sh.scale.set(0.26,0.18,0.2); sh.position.set(0.12,1.2,0.18); g.add(sh);
+    addEyes(g,0.82,0.95,0.2,false); addMouth(g,0.86,0.66,1);
+    if(type==="splitter"){ const band=new THREE.Mesh(GEO.torusM, BAND_MAT); band.scale.setScalar(1.8); band.rotation.x=Math.PI/2; band.position.y=0.78; g.add(band); }
+  } else if(type==="fast"){                          // BAT-IMP
+    bodyMesh=new THREE.Mesh(GEO.sphere, bodyMat); bodyMesh.scale.setScalar(0.62); bodyMesh.position.y=0.95; outline(bodyMesh,1.08); g.add(bodyMesh);
+    for(const s of [-1,1]){ const ear=new THREE.Mesh(GEO.horn, bodyMat); ear.scale.set(1,1.5,1); ear.position.set(-0.05,1.45,s*0.28); ear.rotation.z=0.35*s; g.add(ear); }
+    p.wingL=new THREE.Mesh(GEO.wing, WING_MAT); p.wingL.scale.set(0.5,0.85,0.12); p.wingL.position.set(-0.15,0.95,0.5);  g.add(p.wingL);
+    p.wingR=new THREE.Mesh(GEO.wing, WING_MAT); p.wingR.scale.set(0.5,0.85,0.12); p.wingR.position.set(-0.15,0.95,-0.5); g.add(p.wingR);
+    addEyes(g,0.5,0.98,0.15,false); addBrows(g,0.5,0.98);
+  } else if(type==="zigzag"){                        // GHOST
+    bodyMat.transparent=true; bodyMat.opacity=0.86;
+    bodyMesh=new THREE.Mesh(GEO.sphere, bodyMat); bodyMesh.scale.set(0.8,1.05,0.8); bodyMesh.position.y=1.0; g.add(bodyMesh);
+    for(const z of [-0.42,0,0.42]){ const nub=new THREE.Mesh(GEO.ball, bodyMat); nub.scale.set(0.28,0.34,0.28); nub.position.set(0,0.46,z); g.add(nub); }
+    addEyes(g,0.6,1.08,0.18,false); addMouth(g,0.64,0.82,1.2);
+  } else if(type==="tank"){                          // BRUTE GOLEM
+    bodyMesh=new THREE.Mesh(GEO.sphere, bodyMat); bodyMesh.scale.set(1.1,1.0,1.1); bodyMesh.position.y=1.0; outline(bodyMesh,1.06); g.add(bodyMesh);
+    p.armL=new THREE.Mesh(GEO.limbBig, bodyMat); p.armL.position.set(0,1.05,1.0);  g.add(p.armL);
+    p.armR=new THREE.Mesh(GEO.limbBig, bodyMat); p.armR.position.set(0,1.05,-1.0); g.add(p.armR);
+    for(const s of [-1,1]){ const leg=new THREE.Mesh(GEO.ball, bodyMat); leg.scale.set(0.42,0.34,0.42); leg.position.set(0,0.3,s*0.42); g.add(leg); }
+    for(const s of [-1,1]){ const h=new THREE.Mesh(GEO.horn, HORN_MAT); h.scale.set(1.4,1.7,1.4); h.position.set(0.2,1.8,s*0.34); h.rotation.z=-0.4*s; g.add(h); }
+    addEyes(g,0.8,1.12,0.18,false); addBrows(g,0.8,1.12);
+  } else if(type==="boss"){                          // DEMON KING
+    bodyMesh=new THREE.Mesh(GEO.sphere, bodyMat); bodyMesh.scale.set(1.05,0.98,1.05); bodyMesh.position.y=1.0; outline(bodyMesh,1.05); g.add(bodyMesh);
+    p.armL=new THREE.Mesh(GEO.limbBig, bodyMat); p.armL.scale.setScalar(1.25); p.armL.position.set(0,1.05,1.05);  g.add(p.armL);
+    p.armR=new THREE.Mesh(GEO.limbBig, bodyMat); p.armR.scale.setScalar(1.25); p.armR.position.set(0,1.05,-1.05); g.add(p.armR);
+    for(const s of [-1,1]){ const h=new THREE.Mesh(GEO.horn, HORN_MAT); h.scale.set(2.2,2.8,2.2); h.position.set(0.05,1.9,s*0.45); h.rotation.z=-0.45*s; g.add(h); }
+    const crown=new THREE.Mesh(GEO.torusM, HORN_MAT); crown.scale.set(0.6,0.6,0.5); crown.rotation.x=Math.PI/2; crown.position.y=1.95; g.add(crown);
+    addEyes(g,0.85,1.06,0.22,true); addBrows(g,0.85,1.06);
+    for(const s of [-1,1]){ const fang=new THREE.Mesh(GEO.horn, WHITE); fang.scale.set(0.45,0.5,0.45); fang.position.set(0.85,0.62,s*0.12); fang.rotation.z=Math.PI; g.add(fang); }
+  } else {                                            // fallback blob
+    bodyMesh=new THREE.Mesh(GEO.sphere, bodyMat); bodyMesh.position.y=0.8; outline(bodyMesh,1.07); g.add(bodyMesh); addEyes(g,0.82,0.95,0.18,false);
   }
-  g.scale.setScalar(t.size);
-  scene.add(g);
-  return { group:g, body, bodyMat };
+  g.scale.setScalar(t.size); scene.add(g);
+  return { group:g, body:bodyMesh, bodyMat, kind:type, p };
 }
 // Dispose an enemy's unique material when it leaves play (shared geos/mats stay).
 function disposeEnemy(e){ removeObj(e.model.group); if(e.model.bodyMat) e.model.bodyMat.dispose(); }
@@ -457,7 +531,7 @@ let levelChoices=[]; const upgLevels={};
 let enemies=[], bullets=[], particles=[], coins=[], floaters=[], shocks=[], beams=[], drones=[];
 let spawnTimer=0, elapsed=0;
 
-const heroModel=buildHero();
+// (hero is loaded asynchronously near the bottom via loadHero())
 
 function freshPlayer(){ return {
   x:0, y:0, vx:0, vy:0, kx:0, ky:0, facing:0, aimAngle:0, runPhase:0,
@@ -487,7 +561,7 @@ const ui={ score:$("score"), hi:$("hi"), wave:$("wave"), timer:$("timer"), combo
   snd:$("snd"), banner:$("banner"), flash:$("flash"), lowhp:$("lowhp"), bossbar:$("bossbar"), bossfill:$("bossfill"),
   menu:$("menu"), lvlup:$("lvlup"), cards:$("cards"), death:$("death"), deathScore:$("deathScore"),
   deathHi:$("deathHi"), statsCard:$("statsCard"), pause:$("pause") };
-function showOverlay(which){ for(const o of [ui.menu,ui.lvlup,ui.death,ui.pause]) o.classList.remove("show"); if(which) which.classList.add("show"); }
+function showOverlay(which){ for(const o of [$("loading"),ui.menu,ui.lvlup,ui.death,ui.pause]) o.classList.remove("show"); if(which) which.classList.add("show"); }
 
 /* ---------------- 6. INPUT ---------------- */
 addEventListener("keydown", e=>{
@@ -656,8 +730,10 @@ function startGame(){ clearEntities();
   trauma=0; freezeTimer=0; bossRef=null; floatBanner=null;
   stats={ kills:0, shotsFired:0, shotsHit:0, maxCombo:0, runTime:0, bosses:0 };
   refreshChips(); ui.bossbar.style.display="none"; ui.lowhp.style.opacity=0;
+  setHeroAnim("Idle");
   state=STATE.PLAYING; showOverlay(null); }
 function gameOver(){ state=STATE.DEAD; stats.runTime=elapsed;
+  setHeroAnim("Death", true);
   if(score>highScore){ highScore=score; localStorage.setItem("blobBustersHi",String(highScore)); }
   addShake(0.9); screenFlash("255,90,90",0.4,0.7); hitStop(0.12); SFX.gameover(); burst(player.x,player.y,0x3aa0ff,60,2);
   ui.deathScore.textContent="SCORE "+(score|0);
@@ -845,27 +921,45 @@ function killEnemy(index){ const e=enemies[index]; if(!e) return;
 /* ---------------- 14. RENDER SYNC ---------------- */
 const _v=new THREE.Vector3();
 function sync(dt){
-  // Camera follows player smoothly (+ shake).
-  const sh=trauma*trauma*1.0;
-  const tx=player.x+CAM_OFFSET.x+rand(-sh,sh), ty=CAM_OFFSET.y+rand(-sh,sh), tz=player.y+CAM_OFFSET.z+rand(-sh,sh);
-  camera.position.x+=(tx-camera.position.x)*Math.min(1,8*dt);
-  camera.position.y+=(ty-camera.position.y)*Math.min(1,8*dt);
-  camera.position.z+=(tz-camera.position.z)*Math.min(1,8*dt);
-  camera.lookAt(player.x, 1.2, player.y);
+  // Camera: orbit-showcase on the menu, follow the player in-game.
+  if(state===STATE.MENU){
+    const a=elapsedReal*0.3;
+    camera.position.set(Math.cos(a)*9, 5.5, Math.sin(a)*9);
+    camera.lookAt(0, 1.3, 0);
+  } else {
+    const sh=trauma*trauma*1.0;
+    const tx=player.x+CAM_OFFSET.x+rand(-sh,sh), ty=CAM_OFFSET.y+rand(-sh,sh), tz=player.y+CAM_OFFSET.z+rand(-sh,sh);
+    camera.position.x+=(tx-camera.position.x)*Math.min(1,8*dt);
+    camera.position.y+=(ty-camera.position.y)*Math.min(1,8*dt);
+    camera.position.z+=(tz-camera.position.z)*Math.min(1,8*dt);
+    camera.lookAt(player.x, 1.2, player.y);
+  }
 
-  // Hero.
-  const hg=heroModel.group; hg.position.set(player.x,0,player.y); hg.rotation.y=-player.facing;
-  const moving=Math.hypot(player.vx,player.vy)>0.5;
-  const swing=Math.sin(player.runPhase)*(moving?0.6:0); heroModel.legL.rotation.z=swing; heroModel.legR.rotation.z=-swing;
-  heroModel.armL.rotation.z=-swing*0.6; heroModel.armR.rotation.z=swing*0.6;
-  hg.position.y=moving?Math.abs(Math.sin(player.runPhase))*0.12:0;
-  hg.visible=!(player.iframe>0 && Math.floor(elapsedReal*16)%2===0); // blink on i-frames
+  // Hero (real animated GLB, or procedural fallback).
+  if(heroModel){
+    const hg=heroModel.group; hg.position.set(player.x,0,player.y); hg.rotation.y=-player.facing+HERO_YAW;
+    const moving=Math.hypot(player.vx,player.vy)>0.6;
+    if(heroModel.isGLB){
+      heroModel.mixer.update(dt);
+      if(state===STATE.PLAYING) setHeroAnim(moving?"Running":"Idle");
+    } else {
+      const swing=Math.sin(player.runPhase)*(moving?0.6:0); heroModel.legL.rotation.z=swing; heroModel.legR.rotation.z=-swing;
+      heroModel.armL.rotation.z=-swing*0.6; heroModel.armR.rotation.z=swing*0.6;
+      hg.position.y=moving?Math.abs(Math.sin(player.runPhase))*0.12:0;
+    }
+    hg.visible=!(player.iframe>0 && Math.floor(elapsedReal*16)%2===0); // blink on i-frames
+  }
 
-  // Enemies.
-  for(const e of enemies){ const g=e.model.group; const hopH=Math.abs(Math.sin(e.hop))*0.18*Math.min(1.5,e.speedMul);
-    g.position.set(e.x, hopH, e.y); const face=Math.atan2(player.y-e.y, player.x-e.x); g.rotation.y=-face;
-    const sq=1+Math.sin(e.hop)*0.06; e.model.body.scale.set(1/Math.sqrt(sq),sq,1/Math.sqrt(sq));
-    e.model.body.material.color.setHex(e.flash>0?0xffffff:e.color); }
+  // Enemies — distinct idle animation per creature kind.
+  for(const e of enemies){ const m=e.model, g=m.group, hop=e.hop, k=m.kind;
+    g.rotation.y=-Math.atan2(player.y-e.y, player.x-e.x); let baseY=0;
+    if(k==="grunt"||k==="splitter"){ const sq=1+Math.sin(hop*1.5)*0.1; m.body.scale.set(1/Math.sqrt(sq),0.82*sq,1/Math.sqrt(sq)); baseY=Math.abs(Math.sin(hop))*0.12; }
+    else if(k==="fast"){ baseY=0.45+Math.sin(hop*2)*0.18; const f=Math.sin(hop*9)*0.7; if(m.p.wingL)m.p.wingL.rotation.x=Math.PI/2-f; if(m.p.wingR)m.p.wingR.rotation.x=-Math.PI/2+f; }
+    else if(k==="zigzag"){ baseY=0.4+Math.sin(hop*1.4)*0.22; g.rotation.z=Math.sin(hop)*0.08; }
+    else if(k==="tank"){ baseY=Math.abs(Math.sin(hop))*0.07; const s=Math.sin(hop*2)*0.25; if(m.p.armL)m.p.armL.rotation.x=s; if(m.p.armR)m.p.armR.rotation.x=-s; }
+    else if(k==="boss"){ baseY=Math.abs(Math.sin(hop))*0.1; const s=Math.sin(hop*1.5)*0.3; if(m.p.armL)m.p.armL.rotation.x=s; if(m.p.armR)m.p.armR.rotation.x=-s; }
+    g.position.set(e.x, baseY*Math.min(1.6,e.speedMul+0.5), e.y);
+    m.bodyMat.color.setHex(e.flash>0?0xffffff:e.color); }
 
   // Bullets.
   for(const b of bullets) b.mesh.position.set(b.x,1.0,b.y);
@@ -926,6 +1020,7 @@ scene.add(new THREE.Points(partGeo, new THREE.PointsMaterial({ size:0.42, vertex
 let lastTime=performance.now();
 function loop(now){ let dt=(now-lastTime)/1000; lastTime=now; dt=Math.min(dt,0.05); elapsedReal+=dt;
   update(dt); sync(dt); renderer.render(scene,camera); requestAnimationFrame(loop); }
+loadHero();              // kick off hero asset load (shows menu when ready)
 requestAnimationFrame(loop);
 
 addEventListener("resize", ()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
